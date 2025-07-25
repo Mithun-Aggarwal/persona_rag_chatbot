@@ -1,0 +1,30 @@
+# ===================================================
+# Python Dependencies for Persona-Aware RAG Chatbot
+# ===================================================
+
+# -- Core Web & UI Framework --
+# Powers the entire user interface
+streamlit==1.33.0
+
+# -- Google AI & LLM Integration --
+# The official Python SDK for Google's Gemini models
+google-generativeai==0.5.2
+
+# -- Data Backend Connectors --
+# Client for the Pinecone vector database
+pinecone-client==4.1.0
+
+# Official driver for the Neo4j graph database
+neo4j==5.19.0
+
+# -- Configuration & Utilities --
+# Used by the PersonaRouter to parse the persona->namespace YAML map
+PyYAML==6.0.1
+
+# Helps load local environment variables from a .env file for development
+# Note: Streamlit Cloud uses its own secrets management, but this is good practice.
+python-dotenv==1.0.1
+
+# -- Data Handling --
+# Useful for structuring and displaying data, especially from tool outputs
+pandas==2.2.1

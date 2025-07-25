@@ -49,14 +49,20 @@ def get_pinecone_index():
         pc = pinecone.Pinecone(
             api_key=st.secrets["PINECONE_API_KEY"]
         )
-        # Note: Your index name should be stored in secrets or config.
-        # For this example, we'll hardcode it but in a real app, externalize it.
-        index_name = "pbac-main-index" 
+        # --- FIX: Read the index name from secrets instead of hardcoding it ---
+        index_name = st.secrets["PINECONE_INDEX_NAME"] 
+        
+        if index_name not in pc.list_indexes().names():
+            logging.error(f"Pinecone index '{index_name}' not found in your project.")
+            st.error(f"Pinecone index '{index_name}' does not exist. Please check your configuration.", icon="🌲")
+            return None
+
         return pc.Index(index_name)
     except Exception as e:
         logging.error(f"Failed to initialize Pinecone: {e}")
-        st.error("Could not connect to Pinecone. Please check your credentials.", icon="🌲")
+        st.error(f"Could not connect to Pinecone. Please check your credentials and configuration in secrets.toml.", icon="🌲")
         return None
+
 
 @st.cache_resource
 def get_neo4j_driver():

@@ -1,0 +1,42 @@
+# FILE: config/persona_namespace_map.yml
+# V1.0: Defines the query routing strategy for different user personas.
+# This map links a persona to the Pinecone namespaces they should query to get the most relevant results.
+
+# A clinical analyst is interested in the raw clinical details and the structured facts (KG).
+# They are less interested in high-level table summaries.
+clinical_analyst:
+  - namespace: "pbac-clinical"  # Primary: Specialized clinical embeddings
+    weight: 1.0
+  - namespace: "pbac-kg"        # Secondary: Structured facts
+    weight: 0.8
+  - namespace: "pbac-text"      # Tertiary: General context
+    weight: 0.5
+
+# A health economist cares most about the high-level summaries of tables (often containing cost-effectiveness data)
+# and the structured facts from the knowledge graph.
+health_economist:
+  - namespace: "pbac-summary"   # Primary: High-level table summaries
+    weight: 1.0
+  - namespace: "pbac-kg"        # Secondary: Structured facts about policies, sponsors, etc.
+    weight: 0.9
+  - namespace: "pbac-text"      # Tertiary: General context for financial information
+    weight: 0.4
+
+# A regulatory specialist needs the broadest possible view: general context, structured facts, and table summaries.
+# They are less concerned with the specialized clinical embeddings.
+regulatory_specialist:
+  - namespace: "pbac-text"      # Primary: General context from text chunks
+    weight: 1.0
+  - namespace: "pbac-kg"        # Secondary: Structured facts about policies and submissions
+    weight: 0.9
+  - namespace: "pbac-summary"   # Tertiary: High-level summaries of regulatory tables
+    weight: 0.7
+
+# A default or general user gets a balanced search across the primary data stores.
+default:
+  - namespace: "pbac-text"
+    weight: 1.0
+  - namespace: "pbac-summary"
+    weight: 0.8
+  - namespace: "pbac-kg"
+    weight: 0.6

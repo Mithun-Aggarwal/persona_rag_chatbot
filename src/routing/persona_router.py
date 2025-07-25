@@ -10,7 +10,7 @@ from typing import List, Dict, Any
 # Add project root to path to allow imports from src
 sys.path.append(str(Path(__file__).resolve().parents[2]))
 
-from src.common.utils import get_project_root
+#from src.common.utils import get_project_root
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] - %(message)s")
 

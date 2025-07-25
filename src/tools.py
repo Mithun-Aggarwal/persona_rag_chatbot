@@ -83,9 +83,14 @@ def get_neo4j_driver():
 
 # --- SPECIALIST TOOLS ---
 
+# src/tools.py
+
+# ... (keep the top of the file, including imports and get_... functions, the same) ...
+
 def pinecone_search_tool(query: str, namespace: str, top_k: int = 5) -> List[Dict[str, Any]]:
     """
     Performs a semantic search on a specific Pinecone namespace.
+    V1.1: Corrected metadata key lookups to match the actual data schema.
 
     Args:
         query (str): The user's natural language query.
@@ -124,13 +129,16 @@ def pinecone_search_tool(query: str, namespace: str, top_k: int = 5) -> List[Dic
         processed_results = []
         for match in results.get('matches', []):
             metadata = match.get('metadata', {})
-            content = metadata.pop('text', 'No content available.') # Extract text, remove from metadata dict
             
-            # Ensure a clean source dictionary
+            # --- FIX: Use the correct keys from the Pinecone metadata ---
+            # The main content might be in 'source_text_preview' or 'text'. This handles both.
+            content = metadata.get('source_text_preview') or metadata.get('text', 'No content available.')
+            
+            # Extract source info using the correct keys from your data ('doc_id', 'page_numbers')
             source_info = {
-                "document_id": metadata.get("document_id", "N/A"),
-                "page_number": metadata.get("page_number", "N/A"),
-                "source_url": metadata.get("source_url", "N/A"),
+                "document_id": metadata.get("doc_id", "N/A"),
+                "page_number": metadata.get("page_numbers", "N/A"),
+                "source_url": metadata.get("source_pdf_url", "N/A"),
                 "retrieval_score": match.get('score', 0.0)
             }
             
@@ -145,6 +153,8 @@ def pinecone_search_tool(query: str, namespace: str, top_k: int = 5) -> List[Dic
     except Exception as e:
         logging.error(f"An error occurred during Pinecone search: {e}")
         return []
+
+# ... (keep the neo4j_graph_tool and its helpers the same) ...
 
 def neo4j_graph_tool(cypher_query: str) -> List[Dict[str, Any]]:
     """

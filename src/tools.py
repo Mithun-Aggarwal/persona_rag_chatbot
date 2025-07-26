@@ -81,26 +81,14 @@ def get_neo4j_driver():
         st.error("Could not connect to the Neo4j database. Please check your credentials.", icon="🕸️")
         return None
 
-# --- SPECIALIST TOOLS ---
+# ... (keep all other functions and imports as they are) ...
 
-# src/tools.py
-
-# ... (keep the top of the file, including imports and get_... functions, the same) ...
-
-def pinecone_search_tool(query: str, namespace: str, top_k: int = 5) -> List[Dict[str, Any]]:
+def pinecone_search_tool(query: str, namespace: str, top_k: int = 15) -> List[Dict[str, Any]]:
     """
     Performs a semantic search on a specific Pinecone namespace.
-    V1.1: Corrected metadata key lookups to match the actual data schema.
-
-    Args:
-        query (str): The user's natural language query.
-        namespace (str): The Pinecone namespace to search within (e.g., 'pbac-text').
-        top_k (int): The number of results to return.
-
-    Returns:
-        List[Dict[str, Any]]: A list of dictionaries, where each dictionary
-                              contains 'content' and 'source' metadata.
+    V1.3: FINAL version. Includes all variable definitions.
     """
+    # --- FIX: Re-instating the client and index definitions ---
     embedding_client = get_google_ai_client()
     pinecone_index = get_pinecone_index()
 
@@ -129,15 +117,11 @@ def pinecone_search_tool(query: str, namespace: str, top_k: int = 5) -> List[Dic
         processed_results = []
         for match in results.get('matches', []):
             metadata = match.get('metadata', {})
-            
-            # --- FIX: Use the correct keys from the Pinecone metadata ---
-            # The main content might be in 'source_text_preview' or 'text'. This handles both.
             content = metadata.get('source_text_preview') or metadata.get('text', 'No content available.')
             
-            # Extract source info using the correct keys from your data ('doc_id', 'page_numbers')
             source_info = {
                 "document_id": metadata.get("doc_id", "N/A"),
-                "page_number": metadata.get("page_numbers", "N/A"),
+                "page_numbers": metadata.get("page_numbers", "N/A"),
                 "source_url": metadata.get("source_pdf_url", "N/A"),
                 "retrieval_score": match.get('score', 0.0)
             }
@@ -154,21 +138,16 @@ def pinecone_search_tool(query: str, namespace: str, top_k: int = 5) -> List[Dic
         logging.error(f"An error occurred during Pinecone search: {e}")
         return []
 
-# ... (keep the neo4j_graph_tool and its helpers the same) ...
+# ... (the rest of the file remains the same) ...
+
+# In src/tools.py
+
+# ... (keep other functions as they are) ...
 
 def neo4j_graph_tool(cypher_query: str) -> List[Dict[str, Any]]:
     """
     Executes a read-only Cypher query against the Neo4j database.
-
-    Note: This tool expects a valid Cypher query. The main agent is responsible
-    for generating this query from the user's natural language input.
-
-    Args:
-        cypher_query (str): The Cypher query to execute.
-
-    Returns:
-        List[Dict[str, Any]]: A list of dictionaries, where each represents a
-                              result from the graph, formatted for an LLM.
+    V2.0: Corrected to properly handle the Neo4j driver's Result object.
     """
     driver = get_neo4j_driver()
     if not driver:
@@ -177,35 +156,28 @@ def neo4j_graph_tool(cypher_query: str) -> List[Dict[str, Any]]:
 
     results = []
     try:
-        with driver.session(database="neo4j") as session:
-            # Using a read transaction for safety
-            records, summary, keys = session.run(cypher_query)
-            
-            for record in records:
-                # We expect the query to return a path or nodes/relationships
-                # that can be serialized into a text format.
-                # This part is highly dependent on your graph schema and query design.
-                # Example: a query might `RETURN path`
-                path = record.get("path")
-                if path:
-                    # Serialize the path into a human-readable string
-                    content_str, sources = _serialize_path(path)
-                    results.append({"content": content_str, "source": sources})
-                else:
-                    # Fallback for other types of record
-                    record_dict = record.data()
-                    results.append({
-                        "content": str(record_dict),
-                        "source": {"type": "graph_record", "query": cypher_query}
-                    })
+        # The official way to run a query and get records
+        records, _, _ = driver.execute_query(cypher_query)
+
+        for record in records:
+            path = record.get("p") # We expect the query to return a path named 'p'
+            if path:
+                content_str, sources = _serialize_path(path)
+                results.append({"content": content_str, "source": sources})
+            else:
+                record_dict = record.data()
+                results.append({
+                    "content": str(record_dict),
+                    "source": {"type": "graph_record", "query": cypher_query}
+                })
 
         logging.info(f"Neo4j query returned {len(results)} results.")
         return results
     except Exception as e:
         logging.error(f"An error occurred during Neo4j query: {e}")
-        # Return the error message as context so the agent knows the query failed.
         return [{"content": f"Failed to execute Cypher query due to an error: {e}", "source": {"type": "error"}}]
 
+# ... (the _serialize_path helper function remains the same) ...
 def _serialize_path(path: neo4j.graph.Path) -> (str, Dict):
     """
     Helper function to convert a Neo4j Path object into a text representation

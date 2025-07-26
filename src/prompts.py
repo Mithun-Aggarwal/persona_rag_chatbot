@@ -1,85 +1,53 @@
-# src/prompts.py
+# src/prompts.py (V-Final)
 
 """
-V1.1: Centralized repository for all LLM prompts used in the application.
-This version includes refined prompts for more accurate intent classification
-and more flexible, yet still grounded, answer synthesis.
+V-Final: Production-grade prompts for a robust, single-pass RAG agent.
+- CYPHER_GENERATION_PROMPT is simplified and made foolproof to prevent hallucination.
+- SYNTHESIS_PROMPT is upgraded to handle all formatting in a single, powerful call.
 """
 
-# --- INTENT ANALYSIS PROMPT (V1.1) ---
-# Refined to better distinguish between broad search and specific graph lookups.
-INTENT_ANALYSIS_PROMPT = """
-You are an expert intent analysis model. Your task is to analyze the user's query and classify it into one of the following predefined categories based on the user's primary goal.
+# QUERY_DECOMPOSITION_PROMPT is removed. It was a flawed strategy.
 
-**Categories:**
-- **graph_query**: The user is asking for a very specific fact or relationship that is likely structured, such as a trade name, sponsor, or direct indication. These are often "what is" or "who is" questions about a single entity.
-  *Examples: "What is the trade name for ibrutinib?", "Who sponsors Calquence?", "What drugs treat breast cancer?"*
-- **semantic_search**: The user is asking a broader question that requires finding and synthesizing information from text passages. This includes asking for lists, summaries, evidence, or comparisons.
-  *Examples: "What submissions were made by AstraZeneca?", "Find evidence for the use of venetoclax", "Compare Ozempic and Mounjaro", "Summarize the findings for Enhertu."*
-- **general_qa**: The query is a general question or greeting that doesn't fit the other categories.
-
-**Instructions:**
-- Analyze the user query below.
-- Respond with ONLY the single most appropriate category name from the list above. Do not add any explanation or punctuation.
-
-**User Query:**
-{query}
-
-**Intent:**
-"""
-
-
-# --- CYPHER GENERATION PROMPT (V1.1) ---
-# Made more robust with a better schema description.
+# --- CYPHER GENERATION PROMPT (V-Final) ---
 CYPHER_GENERATION_PROMPT = """
-You are an expert Neo4j Cypher query developer. Your task is to convert a natural language question into a read-only Cypher query based on the provided graph schema.
+You are an expert Neo4j Cypher query developer. Your task is to convert a question into a single, valid, read-only Cypher query.
 
-**Graph Schema:**
-Node labels are `Drug`, `Sponsor`, `Disease`.
-Relationship types are `HAS_SPONSOR`, `TREATS`.
-Properties on `Drug` nodes include `name`, `trade_name`.
-Properties on `Sponsor` nodes include `name`.
-Properties on `Disease` nodes include `name`.
+**Schema:**
+- Nodes: `Drug`, `Sponsor`, `Indication`, `SubmissionType`
+- `Drug` Properties: `name`, `trade_name`
+- Relationships: `(:Drug)-[:HAS_SPONSOR]->(:Sponsor)`, `(:Drug)-[:HAS_INDICATION]->(:Indication)`, `(:Drug)-[:HAS_SUBMISSION_TYPE]->(:SubmissionType)`
 
 **Rules:**
-1.  Only use the node labels, relationship types, and properties defined in the schema.
-2.  The query must be read-only. Do not use `CREATE`, `MERGE`, `SET`, `DELETE`, or `REMOVE`.
-3.  The goal is to find paths or entities that answer the user's question. Always `RETURN` a path variable `p` to provide full context, like `RETURN p`.
-4.  Use `toLower()` for case-insensitive matching on properties. E.g., `WHERE toLower(drug.name) CONTAINS 'ozempic'`.
-5.  If the user's question cannot be answered with the given schema, return the single word "ERROR".
+1.  ONLY use the schema provided. Do not invent relationships or properties.
+2.  Your query MUST be simple and start with `MATCH p=`.
+3.  Use `toLower()` for case-insensitive `WHERE` clauses on properties.
+4.  If the question CANNOT be answered with the schema, you MUST return the single word: `NONE`.
+
+**Example Question:** "What is the submission type for Ibrutinib?"
+**Example Valid Query:** "MATCH p=(d:Drug)-[:HAS_SUBMISSION_TYPE]->() WHERE toLower(d.name) CONTAINS 'ibrutinib' RETURN p"
 
 **Task:**
-Generate a Cypher query for the following question. Output **only** the Cypher query.
+Generate a Cypher query for the question below. Output ONLY the query or the word `NONE`.
 
-**Question:**
-{question}
-
-**Cypher Query:**
+**Question:** {question}
 """
 
+# --- ANSWER SYNTHESIS PROMPT (V-Final) ---
+SYNTHESIS_PROMPT = """
+You are an AI assistant, an 'Inter-Expert Interpreter'. Your role is to deliver a comprehensive, accurate, and perfectly cited answer using ONLY the provided context.
 
-# --- ANSWER SYNTHESIS PROMPT (V1.1) ---
-# The most important change. This prompt is slightly relaxed to allow for better synthesis,
-# while still strictly enforcing grounding and citation.
-SYNTHESIS_PROMPT = f"""
-You are an AI assistant acting as an 'Inter-Expert Interpreter'. Your primary function is to synthesize information from potentially fragmented sources (semantic text and graph data) into a single, coherent, and trustworthy answer.
+**User's Question:** "{question}"
 
-You must tailor your language and the depth of your explanation to the user's specified persona: **{{persona}}**
-
-*** CRITICAL RULES OF ENGAGEMENT ***
-1.  **GROUNDING IS PARAMOUNT**: You **MUST** base your answer *only* on the information provided in the 'CONTEXT' section. Do not use any external knowledge.
-2.  **CITE EVERYTHING**: Every single claim, fact, or piece of information in your answer must be followed by a citation marker. For text, use `[doc: DOCUMENT_ID, page: PAGE_NUMBER]`. For graph data, use `[graph: RELATIONSHIP_TYPE]`.
-3.  **REASON, DON'T INVENT**: You are expected to reason about and connect the pieces of information from the context. If multiple sources mention the same drug, synthesize that information. However, do not invent details that are not present (e.g., if a price is not mentioned, do not guess it).
-4.  **HONESTY ABOUT LIMITATIONS**: If, after analyzing the context, you determine the information is insufficient to provide a direct and accurate answer, you MUST state that you cannot answer the question based on the provided information. Do not attempt to give a partial or speculative answer.
-
-**USER'S ORIGINAL QUESTION:**
-"{{question}}"
+*** YOUR INSTRUCTIONS ***
+1.  **Synthesize a Complete Answer**: Read all the provided context blocks and synthesize a single, cohesive answer to the user's question.
+2.  **Cite Your Sources**: As you write, you MUST cite every fact. To do this, find the `Source Citation` for the context block you are using and place it directly after the fact it supports.
+3.  **Create a Reference List**: After your main answer, create a "References" section. List each unique source you cited in a numbered list.
+4.  **Be Honest**: If the context is insufficient to answer the question, you must state that clearly. Do not invent information.
 
 ---
 **CONTEXT:**
-{{context_str}}
+{context_str}
 ---
 
-**TASK:**
-Based on the rules and the context provided, generate a comprehensive, cited answer to the user's question. Use Markdown for clarity.
+**ANSWER:**
 """

@@ -17,6 +17,7 @@ Key Principles:
 4.  **Security**: All API keys and credentials are securely accessed via st.secrets.
 """
 
+from asyncio.log import logger
 import streamlit as st
 import pinecone
 import neo4j
@@ -29,6 +30,49 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # --- CONNECTION INITIALIZATION (CACHED) ---
 
+# In src/tools.py
+
+# ... (keep all existing functions) ...
+
+# In src/tools.py
+
+@st.cache_data(ttl=3600)
+def get_neo4j_schema() -> str:
+    """
+    Connects to Neo4j and dynamically fetches its schema.
+    V1.1: Made robust to handle nodes with no properties.
+    """
+    logger.info("Dynamically fetching Neo4j schema...")
+    driver = get_neo4j_driver()
+    if not driver:
+        return "Error: Could not connect to Neo4j to fetch schema."
+
+    schema_parts = []
+    try:
+        node_properties_query = "CALL db.schema.nodeTypeProperties()"
+        node_records, _, _ = driver.execute_query(node_properties_query)
+        schema_parts.append("Node Labels and Properties:")
+        for record in node_records:
+            label = record['nodeType'].strip('`')
+            # --- THE FIX: Use .get() to safely handle missing 'properties' key ---
+            properties_list = record.get('properties', [])
+            properties = ", ".join([f"{p['propertyName']}: {p['propertyTypes'][0]}" for p in properties_list])
+            schema_parts.append(f"- {label} {{{properties}}}")
+
+        rel_properties_query = "CALL db.schema.relTypeProperties()"
+        rel_records, _, _ = driver.execute_query(rel_properties_query)
+        schema_parts.append("\nRelationship Types:")
+        for record in rel_records:
+            rel_type = record['relType'].strip('`').replace('`', '')
+            schema_parts.append(f"- {rel_type}")
+            
+        schema_string = "\n".join(schema_parts)
+        logger.info(f"Successfully fetched schema:\n{schema_string}")
+        return schema_string
+    except Exception as e:
+        logger.error(f"Failed to fetch Neo4j schema: {e}")
+        return "Error: Could not dynamically fetch schema. Using a basic fallback."
+    
 @st.cache_resource
 def get_google_ai_client():
     """Initializes and returns a Google Generative AI client."""
@@ -83,7 +127,7 @@ def get_neo4j_driver():
 
 # ... (keep all other functions and imports as they are) ...
 
-def pinecone_search_tool(query: str, namespace: str, top_k: int = 15) -> List[Dict[str, Any]]:
+def pinecone_search_tool(query: str, namespace: str, top_k: int = 100) -> List[Dict[str, Any]]:
     """
     Performs a semantic search on a specific Pinecone namespace.
     V1.3: FINAL version. Includes all variable definitions.

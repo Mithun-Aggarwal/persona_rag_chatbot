@@ -1,0 +1,14 @@
+========================================================================
+  Project File Structure for: /home/mit/persona_rag_chatbot
+  (This list is from 'git ls-files' and is 100% accurate to the Git index)
+========================================================================
+
+.gitignore
+config/persona_namespace_map.yml
+requirements.txt
+src/agent.py
+src/common_utils.py
+src/prompts.py
+src/routing/persona_router.py
+src/tools.py
+streamlit_app.py

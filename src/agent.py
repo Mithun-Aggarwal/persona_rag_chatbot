@@ -18,15 +18,24 @@ class MainAgent:
         self.llm = genai.GenerativeModel('gemini-1.5-flash-latest')
 
     def _generate_cypher(self, query: str) -> str | None:
-        logger.info("Attempting to generate Cypher query...")
-        prompt = prompts.CYPHER_GENERATION_PROMPT.format(question=query)
+        logger.info("Attempting to generate Cypher query using dynamic schema...")
+        
+        live_schema = tools.get_neo4j_schema()
+        
+        prompt = prompts.CYPHER_GENERATION_PROMPT.format(
+            schema=live_schema,
+            question=query
+        )
         try:
             response = self.llm.generate_content(prompt)
-            cypher_query = response.text.strip()
+            # --- THE FIX: Clean the markdown fences from the LLM's output ---
+            cypher_query = response.text.strip().replace("```cypher", "").replace("```", "").strip()
+            
             if "NONE" in cypher_query or "MATCH" not in cypher_query.upper():
-                logger.warning("LLM determined question is not suitable for graph query.")
+                logger.warning("LLM determined question is not suitable for graph query based on live schema.")
                 return None
-            logger.info(f"Successfully generated Cypher: {cypher_query}")
+                
+            logger.info(f"Successfully generated Cypher using live schema: {cypher_query}")
             return cypher_query
         except Exception as e:
             logger.error(f"Error during Cypher generation: {e}")

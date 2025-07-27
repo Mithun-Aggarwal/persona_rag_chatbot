@@ -1,0 +1,718 @@
+========================================================================
+  Combined Python Files from Git Repository: /home/mit/persona_rag_chatbot
+  Generated on: Sun 27 Jul 2025 19:43:57 AEST
+========================================================================
+
+
+
+########################################################################
+### FILE: src/agent.py
+########################################################################
+
+# src/agent.py (V-Final)
+
+import streamlit as st
+import google.generativeai as genai
+import logging
+from typing import List, Dict, Any
+
+from src import prompts, tools
+from src.routing.persona_router import PersonaRouter
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(name)s] - %(message)s')
+logger = logging.getLogger(__name__)
+
+class MainAgent:
+    def __init__(self, persona: str):
+        self.persona = persona
+        self.router = PersonaRouter()
+        self.llm = genai.GenerativeModel('gemini-1.5-flash-latest')
+
+    def _generate_cypher(self, query: str) -> str | None:
+        logger.info("Attempting to generate Cypher query using dynamic schema...")
+        
+        live_schema = tools.get_neo4j_schema()
+        
+        prompt = prompts.CYPHER_GENERATION_PROMPT.format(
+            schema=live_schema,
+            question=query
+        )
+        try:
+            response = self.llm.generate_content(prompt)
+            # --- THE FIX: Clean the markdown fences from the LLM's output ---
+            cypher_query = response.text.strip().replace("```cypher", "").replace("```", "").strip()
+            
+            if "NONE" in cypher_query or "MATCH" not in cypher_query.upper():
+                logger.warning("LLM determined question is not suitable for graph query based on live schema.")
+                return None
+                
+            logger.info(f"Successfully generated Cypher using live schema: {cypher_query}")
+            return cypher_query
+        except Exception as e:
+            logger.error(f"Error during Cypher generation: {e}")
+            return None
+
+    def _format_context_with_citations(self, context: List[Dict[str, Any]]) -> str:
+        logger.info("Formatting context and creating citation markers.")
+        context_str = ""
+        # Create a mapping from a unique source description to a reference number
+        source_map = {}
+        ref_counter = 1
+        
+        for item in context:
+            source_info = item.get('source', {})
+            content = item.get('content', 'No content available.')
+            doc_id = source_info.get("document_id", "N/A")
+            
+            # Create a unique, readable source string
+            pages = source_info.get("page_numbers")
+            source_key = ""
+            if isinstance(pages, list) and pages:
+                page_str = ", ".join(map(str, sorted(list(set(pages)))))
+                source_key = f"doc: {doc_id}, page: {page_str}"
+            elif source_info.get("type") == "graph_path":
+                source_key = f"Graph Query Result for '{item['content'][:50]}...'"
+            elif doc_id != "N/A":
+                source_key = f"doc: {doc_id}"
+            else:
+                continue # Skip context with no identifiable source
+                
+            if source_key not in source_map:
+                source_map[source_key] = f"[{ref_counter}]"
+                ref_counter += 1
+            
+            citation_marker = source_map[source_key]
+
+            context_str += f"--- Context Source ---\n"
+            context_str += f"Source Citation: {citation_marker}\n"
+            context_str += f"Content: {content}\n\n"
+        
+        # Also create the reference list to append to the prompt
+        reference_list = "\n".join([f"{num} {key}" for key, num in source_map.items()])
+        context_str += f"\n--- Available References ---\n{reference_list}\n"
+        return context_str
+    
+    def run(self, query: str) -> str:
+        if not self.llm: return "The AI model is not available."
+
+        # Step 1: Simple, Robust Retrieval
+        logger.info("Starting robust retrieval process.")
+        retrieved_context = []
+        namespaces = self.router.get_retrieval_plan(self.persona)
+        
+        # 1a. Vector Search (on original query only)
+        unique_content = set()
+        for namespace in namespaces:
+            pinecone_results = tools.pinecone_search_tool(query=query, namespace=namespace)
+            for res in pinecone_results:
+                content = res.get('content')
+                if content and content not in unique_content:
+                    retrieved_context.append(res)
+                    unique_content.add(content)
+
+        # 1b. Graph Search (on original query only)
+        cypher_query = self._generate_cypher(query)
+        if cypher_query:
+            graph_results = tools.neo4j_graph_tool(cypher_query=cypher_query)
+            if graph_results: retrieved_context.extend(graph_results)
+            
+        if not retrieved_context:
+            return "Based on the provided documents, I could not find sufficient information to answer this question."
+
+        # Step 2: Format Context and Synthesize in a Single, Powerful Call
+        # The prompt now instructs the LLM to do all the work, which is more reliable.
+        formatted_context = self._format_context_with_citations(retrieved_context)
+        final_prompt = prompts.SYNTHESIS_PROMPT.format(question=query, context_str=formatted_context)
+        
+        try:
+            logger.info("Synthesizing final answer using single-pass method.")
+            final_answer = self.llm.generate_content(final_prompt).text
+        except Exception as e:
+            logger.error(f"Error during final synthesis: {e}")
+            return "I apologize, but I encountered a critical error while formulating a response."
+
+        logger.info("Agent run completed successfully.")
+        return final_answer
+
+
+########################################################################
+### FILE: src/common_utils.py
+########################################################################
+
+# src/common_utils.py
+
+"""
+Common utility functions shared across the application.
+"""
+
+from pathlib import Path
+
+def get_project_root() -> Path:
+    """
+    Returns the absolute path to the project root directory.
+
+    This is a robust way to reference files (like configs) from anywhere
+    within the project, regardless of where the script is run from.
+    """
+    # We assume this file is in 'src/'. The project root is one level up.
+    return Path(__file__).parent.parent.resolve()
+
+
+########################################################################
+### FILE: src/prompts.py
+########################################################################
+
+# src/prompts.py (V-Final)
+
+"""
+V-Final: Production-grade prompts for a robust, single-pass RAG agent.
+- CYPHER_GENERATION_PROMPT is simplified and made foolproof to prevent hallucination.
+- SYNTHESIS_PROMPT is upgraded to handle all formatting in a single, powerful call.
+"""
+
+# QUERY_DECOMPOSITION_PROMPT is removed. It was a flawed strategy.
+
+# --- CYPHER GENERATION PROMPT (V-Final) ---
+# In src/prompts.py
+
+# ... (keep SYNTHESIS_PROMPT the same) ...
+
+# --- CYPHER GENERATION PROMPT (V-Final with Dynamic Schema) ---
+# In src/prompts.py
+
+# --- CYPHER GENERATION PROMPT (V-Final for Generic Entity Graph) ---
+CYPHER_GENERATION_PROMPT = """
+You are an expert Neo4j Cypher query developer. Your task is to convert a question into a single, valid, read-only Cypher query for a graph with a generic data model.
+
+**Live Graph Schema:**
+- There is only one Node Label: `:Entity`.
+- Specific information is stored as properties within `:Entity` nodes. Key properties include `name`, `type` (e.g., 'Drug', 'Sponsor'), `trade_name`, etc.
+- Relationships connect these `:Entity` nodes.
+
+**Rules:**
+1.  You MUST query using the `:Entity` label.
+2.  You MUST filter entities by using their properties in a `WHERE` clause. For example, to find a drug, use `WHERE e.type = 'Drug' AND toLower(e.name) CONTAINS '...'`.
+3.  Your query must be read-only and return a path `p`.
+4.  If the question cannot be answered, return the single word: `NONE`.
+
+**Example Question:** "What is the trade name for Ibrutinib?"
+**Example Valid Query:** "MATCH p=(e:Entity) WHERE e.type = 'Drug' AND toLower(e.name) CONTAINS 'ibrutinib' RETURN p"
+
+**Task:**
+Generate a Cypher query for the question below. Output ONLY the query or the word `NONE`.
+
+**Question:** {question}
+"""
+
+# --- ANSWER SYNTHESIS PROMPT (V-Final) ---
+SYNTHESIS_PROMPT = """
+You are an AI assistant, an 'Inter-Expert Interpreter'. Your role is to deliver a comprehensive, accurate, and perfectly cited answer using ONLY the provided context.
+
+**User's Question:** "{question}"
+
+*** YOUR INSTRUCTIONS ***
+1.  **Synthesize a Complete Answer**: Read all the provided context blocks and synthesize a single, cohesive answer to the user's question.
+2.  **Cite Your Sources**: As you write, you MUST cite every fact. To do this, find the `Source Citation` for the context block you are using and place it directly after the fact it supports.
+3.  **Create a Reference List**: After your main answer, create a "References" section. List each unique source you cited in a numbered list.
+4.  **Be Honest**: If the context is insufficient to answer the question, you must state that clearly. Do not invent information.
+
+---
+**CONTEXT:**
+{context_str}
+---
+
+**ANSWER:**
+"""
+
+
+########################################################################
+### FILE: src/routing/persona_router.py
+########################################################################
+
+# src/routing/persona_router.py
+
+# V1.1: Implements the PersonaRouter class for intelligent, config-driven query planning.
+# This version is updated to be self-contained and parse a weighted namespace map.
+
+import logging
+import yaml
+from pathlib import Path
+from typing import List, Dict, Any
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
+
+class PersonaRouter:
+    """
+    Loads a persona-to-namespace map and provides query plans for a RAG system.
+
+    This class translates a high-level persona name into a concrete list of
+    Pinecone namespaces that should be queried to find the most relevant
+    information for that user. It reads this mapping from a YAML config file.
+    """
+    def __init__(self, map_file_path: Path = None):
+        """
+        Initializes the router by loading the persona-to-namespace map.
+
+        Args:
+            map_file_path: Optional path to the map file. If None, it defaults to
+                           'config/persona_namespace_map.yml' in the project root.
+        """
+        if map_file_path is None:
+            # Robustly find the project root relative to this file's location
+            # (src/routing/persona_router.py -> go up 2 levels to project root)
+            project_root = Path(__file__).resolve().parents[2]
+            self.map_file_path = project_root / "config" / "persona_namespace_map.yml"
+        else:
+            self.map_file_path = map_file_path
+
+        try:
+            with open(self.map_file_path, 'r') as f:
+                self.persona_map = yaml.safe_load(f)
+            logging.info(f"Successfully loaded persona map from {self.map_file_path}")
+        except FileNotFoundError:
+            logging.error(f"FATAL: Persona map file not found at {self.map_file_path}")
+            st.error(f"Persona config file not found. Please ensure `config/persona_namespace_map.yml` exists.")
+            # In a real app, you might want to raise the exception or handle it differently
+            self.persona_map = {}
+        except Exception as e:
+            logging.error(f"FATAL: Error loading or parsing persona map file: {e}")
+            self.persona_map = {}
+
+    def get_retrieval_plan(self, persona: str) -> List[str]:
+        """
+        Gets the list of namespaces for a given persona.
+
+        Args:
+            persona (str): The name of the persona (e.g., 'clinical_analyst').
+
+        Returns:
+            A list of namespace names (e.g., ['pbac-clinical', 'pbac-kg']).
+        """
+        # Normalize the persona string to match YAML keys (e.g., "Clinical Analyst" -> "clinical_analyst")
+        normalized_persona = persona.lower().replace(" ", "_")
+
+        persona_plan = self.persona_map.get(normalized_persona, self.persona_map.get('default', []))
+        
+        if not persona_plan:
+            logging.warning(f"No plan found for persona '{normalized_persona}' or default. Returning empty list.")
+            return []
+
+        # Extract just the 'namespace' value from each dictionary in the list
+        namespaces = [item['namespace'] for item in persona_plan if 'namespace' in item]
+        
+        logging.info(f"Retrieval plan for persona '{persona}': Query namespaces {namespaces}")
+        return namespaces
+
+
+########################################################################
+### FILE: src/tools.py
+########################################################################
+
+# src/tools.py
+
+"""
+Specialized Data Retrieval Tools for the RAG Agent.
+
+This module contains the functions that form the "second brain" of the agent.
+Each function is a "tool" that the main agent can call to retrieve specific
+information from a backend data source (Pinecone Vector DB, Neo4j Graph DB).
+
+Key Principles:
+1.  **Modularity**: Each tool is self-contained and handles one specific data source.
+2.  **Efficiency**: Connections to databases are cached using Streamlit's resource caching
+    to avoid re-establishing connections on every run.
+3.  **Provenance**: Every piece of context retrieved is bundled with its source
+    metadata (e.g., document ID, page number, URL). This is crucial for citation
+    and explainability.
+4.  **Security**: All API keys and credentials are securely accessed via st.secrets.
+"""
+
+from asyncio.log import logger
+import streamlit as st
+import pinecone
+import neo4j
+import google.generativeai as genai
+from typing import List, Dict, Any
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- CONNECTION INITIALIZATION (CACHED) ---
+
+# In src/tools.py
+
+# ... (keep all existing functions) ...
+
+# In src/tools.py
+
+@st.cache_data(ttl=3600)
+def get_neo4j_schema() -> str:
+    """
+    Connects to Neo4j and dynamically fetches its schema.
+    V1.1: Made robust to handle nodes with no properties.
+    """
+    logger.info("Dynamically fetching Neo4j schema...")
+    driver = get_neo4j_driver()
+    if not driver:
+        return "Error: Could not connect to Neo4j to fetch schema."
+
+    schema_parts = []
+    try:
+        node_properties_query = "CALL db.schema.nodeTypeProperties()"
+        node_records, _, _ = driver.execute_query(node_properties_query)
+        schema_parts.append("Node Labels and Properties:")
+        for record in node_records:
+            label = record['nodeType'].strip('`')
+            # --- THE FIX: Use .get() to safely handle missing 'properties' key ---
+            properties_list = record.get('properties', [])
+            properties = ", ".join([f"{p['propertyName']}: {p['propertyTypes'][0]}" for p in properties_list])
+            schema_parts.append(f"- {label} {{{properties}}}")
+
+        rel_properties_query = "CALL db.schema.relTypeProperties()"
+        rel_records, _, _ = driver.execute_query(rel_properties_query)
+        schema_parts.append("\nRelationship Types:")
+        for record in rel_records:
+            rel_type = record['relType'].strip('`').replace('`', '')
+            schema_parts.append(f"- {rel_type}")
+            
+        schema_string = "\n".join(schema_parts)
+        logger.info(f"Successfully fetched schema:\n{schema_string}")
+        return schema_string
+    except Exception as e:
+        logger.error(f"Failed to fetch Neo4j schema: {e}")
+        return "Error: Could not dynamically fetch schema. Using a basic fallback."
+    
+@st.cache_resource
+def get_google_ai_client():
+    """Initializes and returns a Google Generative AI client."""
+    try:
+        genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
+        # Model for embedding generation
+        model = genai.GenerativeModel('models/embedding-001')
+        return model
+    except Exception as e:
+        logging.error(f"Failed to initialize Google AI client: {e}")
+        st.error("Could not connect to Google AI. Please check your API key.", icon="🚨")
+        return None
+
+@st.cache_resource
+def get_pinecone_index():
+    """Initializes and returns a connection to the Pinecone index."""
+    try:
+        pc = pinecone.Pinecone(
+            api_key=st.secrets["PINECONE_API_KEY"]
+        )
+        # --- FIX: Read the index name from secrets instead of hardcoding it ---
+        index_name = st.secrets["PINECONE_INDEX_NAME"] 
+        
+        if index_name not in pc.list_indexes().names():
+            logging.error(f"Pinecone index '{index_name}' not found in your project.")
+            st.error(f"Pinecone index '{index_name}' does not exist. Please check your configuration.", icon="🌲")
+            return None
+
+        return pc.Index(index_name)
+    except Exception as e:
+        logging.error(f"Failed to initialize Pinecone: {e}")
+        st.error(f"Could not connect to Pinecone. Please check your credentials and configuration in secrets.toml.", icon="🌲")
+        return None
+
+
+@st.cache_resource
+def get_neo4j_driver():
+    """Initializes and returns a Neo4j driver instance."""
+    try:
+        driver = neo4j.GraphDatabase.driver(
+            st.secrets["NEO4J_URI"],
+            auth=(st.secrets["NEO4J_USERNAME"], st.secrets["NEO4J_PASSWORD"])
+        )
+        # Verify connection
+        driver.verify_connectivity()
+        logging.info("Neo4j driver initialized successfully.")
+        return driver
+    except Exception as e:
+        logging.error(f"Failed to initialize Neo4j driver: {e}")
+        st.error("Could not connect to the Neo4j database. Please check your credentials.", icon="🕸️")
+        return None
+
+# ... (keep all other functions and imports as they are) ...
+
+def pinecone_search_tool(query: str, namespace: str, top_k: int = 100) -> List[Dict[str, Any]]:
+    """
+    Performs a semantic search on a specific Pinecone namespace.
+    V1.3: FINAL version. Includes all variable definitions.
+    """
+    # --- FIX: Re-instating the client and index definitions ---
+    embedding_client = get_google_ai_client()
+    pinecone_index = get_pinecone_index()
+
+    if not all([embedding_client, pinecone_index]):
+        logging.error("Search failed: Pinecone or Google AI client not available.")
+        return []
+
+    try:
+        # 1. Create embedding for the user's query
+        query_embedding_result = genai.embed_content(
+            model='models/embedding-001',
+            content=query,
+            task_type="retrieval_query"
+        )
+        query_embedding = query_embedding_result['embedding']
+
+        # 2. Query Pinecone
+        results = pinecone_index.query(
+            namespace=namespace,
+            vector=query_embedding,
+            top_k=top_k,
+            include_metadata=True
+        )
+
+        # 3. Process and format results with provenance
+        processed_results = []
+        for match in results.get('matches', []):
+            metadata = match.get('metadata', {})
+            content = metadata.get('source_text_preview') or metadata.get('text', 'No content available.')
+            
+            source_info = {
+                "document_id": metadata.get("doc_id", "N/A"),
+                "page_numbers": metadata.get("page_numbers", "N/A"),
+                "source_url": metadata.get("source_pdf_url", "N/A"),
+                "retrieval_score": match.get('score', 0.0)
+            }
+            
+            processed_results.append({
+                "content": content,
+                "source": source_info
+            })
+            
+        logging.info(f"Pinecone search in namespace '{namespace}' returned {len(processed_results)} results.")
+        return processed_results
+
+    except Exception as e:
+        logging.error(f"An error occurred during Pinecone search: {e}")
+        return []
+
+# ... (the rest of the file remains the same) ...
+
+# In src/tools.py
+
+# ... (keep other functions as they are) ...
+
+def neo4j_graph_tool(cypher_query: str) -> List[Dict[str, Any]]:
+    """
+    Executes a read-only Cypher query against the Neo4j database.
+    V2.0: Corrected to properly handle the Neo4j driver's Result object.
+    """
+    driver = get_neo4j_driver()
+    if not driver:
+        logging.error("Graph query failed: Neo4j driver not available.")
+        return []
+
+    results = []
+    try:
+        # The official way to run a query and get records
+        records, _, _ = driver.execute_query(cypher_query)
+
+        for record in records:
+            path = record.get("p") # We expect the query to return a path named 'p'
+            if path:
+                content_str, sources = _serialize_path(path)
+                results.append({"content": content_str, "source": sources})
+            else:
+                record_dict = record.data()
+                results.append({
+                    "content": str(record_dict),
+                    "source": {"type": "graph_record", "query": cypher_query}
+                })
+
+        logging.info(f"Neo4j query returned {len(results)} results.")
+        return results
+    except Exception as e:
+        logging.error(f"An error occurred during Neo4j query: {e}")
+        return [{"content": f"Failed to execute Cypher query due to an error: {e}", "source": {"type": "error"}}]
+
+# ... (the _serialize_path helper function remains the same) ...
+def _serialize_path(path: neo4j.graph.Path) -> (str, Dict):
+    """
+    Helper function to convert a Neo4j Path object into a text representation
+    and extract source metadata.
+    """
+    nodes_str = []
+    rels_str = []
+    sources = {"nodes": [], "relationships": []}
+
+    for node in path.nodes:
+        node_props = dict(node)
+        node_label = next(iter(node.labels), "Node")
+        nodes_str.append(f"({node_label} {{name: '{node_props.get('name', 'Unknown')}'}})")
+        sources["nodes"].append(node_props)
+
+    for rel in path.relationships:
+        rel_props = dict(rel)
+        # Critical: Extracting provenance from the relationship properties
+        source_preview = rel_props.pop('source_text_preview', 'N/A')
+        page_number = rel_props.pop('page_number', 'N/A')
+        
+        rel_str = f"-[{rel.type} {rel_props}]->"
+        rels_str.append(rel_str)
+        sources["relationships"].append({
+            "type": rel.type,
+            "page": page_number,
+            "preview": source_preview
+        })
+
+    # Weave nodes and relationships together
+    full_path_str = nodes_str[0]
+    for i, rel_s in enumerate(rels_str):
+        full_path_str += rel_s + nodes_str[i+1]
+
+    # Combine sources into a single representative source for this path
+    combined_source = {
+        "type": "graph_path",
+        "primary_source": sources["relationships"][0] if sources["relationships"] else "N/A"
+    }
+    return full_path_str, combined_source
+
+
+########################################################################
+### FILE: streamlit_app.py
+########################################################################
+
+# streamlit_app.py
+
+import streamlit as st
+import google.generativeai as genai
+import logging
+from src.agent import MainAgent
+
+# --- Page Configuration ---
+st.set_page_config(
+    page_title="Persona RAG Chatbot",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# --- Logging Configuration ---
+# Use a logger for this module
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(name)s] - %(message)s')
+
+# --- Session State Initialization ---
+if "messages" not in st.session_state:
+    st.session_state.messages = [{"role": "assistant", "content": "How can I help you today?"}]
+if "agent" not in st.session_state:
+    st.session_state.agent = None
+if "current_persona" not in st.session_state:
+    st.session_state.current_persona = "Clinical Analyst"
+if "google_api_key" not in st.session_state:
+    st.session_state.google_api_key = None
+
+# --- NEW: Updated Test Questions for Expanded Knowledge Base ---
+test_questions = {
+    "✅ Positive Tests (Info is Present)": [
+        "What submissions were made for non-small cell lung cancer (NSCLC) in the March and May 2025 meetings?",
+        "What is the specific patient population for the Dostarlimab submission in the May 2025 agenda?",
+        "What company sponsors Abaloparatide and what condition does it treat?",
+    ],
+    "❌ Negative Tests (Info is NOT Present)": [
+        "Was the submission for Amivantamab and Lazertinib from the March 2025 meeting approved?",
+        "What information is available about Ozempic (semaglutide) in the 2025 meeting agendas?",
+        "What was the price or economic evaluation submitted for the Abaloparatide listing?",
+    ]
+}
+
+# --- Sidebar Configuration ---
+with st.sidebar:
+    st.header("🤖 Persona RAG Chatbot")
+    st.markdown("This chatbot uses a sophisticated multi-agent system to answer questions based on a private knowledge base. Select a persona to tailor its responses and retrieval strategy.")
+
+    persona_options = ['Clinical Analyst', 'Health Economist', 'Regulatory Specialist']
+    try:
+        current_index = persona_options.index(st.session_state.current_persona)
+    except ValueError:
+        current_index = 0
+
+    persona = st.radio(
+        "**Choose your Persona:**",
+        options=persona_options,
+        index=current_index
+    )
+    st.divider()
+
+    st.markdown("### Configuration")
+    if st.secrets.get("GOOGLE_API_KEY"):
+        st.session_state.google_api_key = st.secrets["GOOGLE_API_KEY"]
+        st.success("API key loaded from secrets!", icon="✅")
+    else:
+        st.warning("Google API Key not found in secrets.", icon="⚠️")
+        st.session_state.google_api_key = st.text_input(
+            "Enter your Google API Key:", type="password", help="Your key is not stored."
+        )
+    st.divider()
+
+    # --- Updated Test Questions UI ---
+    st.markdown("### 🧪 Test Questions")
+    st.markdown("Click a button to run a pre-defined test query.")
+    for category, questions in test_questions.items():
+        with st.expander(category):
+            for question in questions:
+                if st.button(question, key=question, use_container_width=True):
+                    st.session_state.run_prompt = question
+
+# --- Main Application Logic ---
+
+st.title(f"Persona: {persona}")
+st.markdown("Ask a question about the knowledge base.")
+
+# Initialize the agent
+if st.session_state.current_persona != persona or st.session_state.agent is None:
+    if st.session_state.google_api_key:
+        with st.spinner(f"Initializing agent for {persona}..."):
+            try:
+                genai.configure(api_key=st.session_state.google_api_key)
+                st.session_state.agent = MainAgent(persona=persona)
+                st.session_state.current_persona = persona
+                if st.session_state.agent:
+                    st.toast(f"Agent activated for '{persona}' persona.", icon="🧠")
+            except Exception as e:
+                st.error(f"Failed to initialize the agent: {e}", icon="🚨")
+                st.session_state.agent = None
+    else:
+        st.session_state.agent = None
+
+# Display chat messages
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+# --- Handle prompt from either button click or chat input ---
+if "run_prompt" in st.session_state and st.session_state.run_prompt:
+    prompt = st.session_state.run_prompt
+    st.session_state.run_prompt = None  # Clear the state immediately
+else:
+    prompt = st.chat_input("Your question...")
+
+# Process the prompt if one exists
+if prompt:
+    if not st.session_state.google_api_key or not st.session_state.agent:
+        st.warning("Please ensure your API key is set and the agent is initialized.", icon="🔑")
+        st.stop()
+
+    # Add user message to history and display it
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.markdown(prompt)
+
+    # Get and display assistant response
+    with st.chat_message("assistant"):
+        with st.status("The agent is thinking...", expanded=True) as status:
+            st.write("Retrieving relevant information...")
+            st.write("Synthesizing a grounded answer...")
+            response = st.session_state.agent.run(prompt)
+            status.update(label="Answer generated!", state="complete", expanded=False)
+        st.markdown(response)
+
+    # Add assistant response to history
+    st.session_state.messages.append({"role": "assistant", "content": response})
+    st.rerun()

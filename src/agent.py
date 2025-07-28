@@ -1,124 +1,132 @@
-# src/agent.py
-
+# FILE: src/agent.py
+# V2.1: Unified Agent with Integrated Trace Logging
 import logging
+import json
+import time
+from pathlib import Path
+from datetime import datetime
 from typing import List
-import google.generativeai as genai
 
-from src import tools, prompts, retrievers
-from src.models import ContextItem
-from src.routing.persona_router import PersonaRouter
+from src.tools.clients import get_google_ai_client
+from src.models import ToolResult, QueryMetadata, ToolPlanItem
+from src.planner.query_classifier import QueryClassifier
+from src.planner.tool_planner import ToolPlanner
+from src.router.tool_router import ToolRouter
+from src.fallback import should_trigger_fallback, render_fallback_message
+from src.prompts import SYNTHESIS_PROMPT
 
 logger = logging.getLogger(__name__)
 
-class MainAgent:
-    def __init__(self, persona: str):
-        self.persona = persona
-        self.router = PersonaRouter()
-        self.llm = genai.GenerativeModel('gemini-1.5-flash-latest')
+### NEW: Logging Integration - Logic from middleware is now here ###
+LOG_PATH = Path("trace_logs.jsonl")
 
-    def _generate_cypher(self, query: str) -> str | None:
-        logger.info("Attempting to generate Cypher query...")
-        try:
-            # This now correctly calls the new function in tools.py
-            live_schema = tools.get_neo4j_schema()
-            if "Error:" in live_schema:
-                logger.error(f"Could not generate Cypher, failed to get schema: {live_schema}")
-                return None
-        except Exception as e:
-            logger.error(f"Could not generate Cypher, failed to get schema: {e}")
-            return None
+class Timer:
+    """A context manager for timing code blocks."""
+    def __enter__(self):
+        self.start = time.perf_counter()
+        return self
 
-        prompt = prompts.CYPHER_GENERATION_PROMPT.format(
-            schema=live_schema,
-            question=query
-        )
-        try:
-            response = self.llm.generate_content(prompt)
-            cypher_query = response.text.strip().replace("```cypher", "").replace("```", "") # Clean up markdown
+    def __exit__(self, *args):
+        self.end = time.perf_counter()
+        self.duration = self.end - self.start
 
-            if "NONE" in cypher_query.upper() or "MATCH" not in cypher_query.upper():
-                logger.warning("LLM determined question is not suitable for graph query.")
-                return None
+def log_trace(
+    query: str,
+    persona: str,
+    query_meta: QueryMetadata,
+    tool_plan: List[ToolPlanItem],
+    tool_results: List[ToolResult],
+    final_answer: str,
+    total_latency_sec: float
+):
+    """Writes a structured JSON line capturing the full agent loop."""
+    trace_record = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "query": query,
+        "persona": persona,
+        "intent": query_meta.intent if query_meta else "classification_failed",
+        "graph_suitable": query_meta.question_is_graph_suitable if query_meta else "unknown",
+        "tool_plan": [t.model_dump() for t in tool_plan],
+        "tool_results": [r.model_dump() for r in tool_results],
+        "final_answer_preview": final_answer[:200] + "..." if final_answer else "N/A",
+        "total_latency_sec": round(total_latency_sec, 3)
+    }
 
-            logger.info(f"Successfully generated Cypher: {cypher_query}")
-            return cypher_query
-        except Exception as e:
-            logger.error(f"Error during Cypher generation: {e}")
-            return None
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(trace_record) + "\n")
+        logger.info(f"Trace logged successfully to {LOG_PATH.resolve()}")
+    except Exception as e:
+        logger.error(f"Failed to write trace log: {e}", exc_info=True)
+### End of Logging Integration ###
 
-    def _format_context_with_citations(self, context: List[ContextItem]) -> str:
-        logger.info("Formatting context and creating citation markers.")
-        context_str = ""
-        source_map = {}
-        ref_counter = 1
 
-        for item in context:
-            source = item.source
-            if source.type in ["graph_path", "graph_record"]:
-                # Use a cleaner key for graph results
-                source_key = f"Graph DB Record (Query: '{source.query[:60]}...')"
-            elif source.document_id and source.page_numbers:
-                page_str = ", ".join(map(str, sorted(list(set(source.page_numbers)))))
-                source_key = f"Document: {source.document_id}, Page(s): {page_str}"
-            elif source.document_id:
-                source_key = f"Document: {source.document_id}"
-            else:
-                continue # Skip items with no identifiable source
-
-            if source_key not in source_map:
-                source_map[source_key] = f"[{ref_counter}]"
-                ref_counter += 1
-
-            citation_marker = source_map[source_key]
-
-            context_str += f"--- Context Source ---\n"
-            context_str += f"Source Citation: {citation_marker}\n"
-            context_str += f"Content: {item.content}\n\n"
-
-        # Only add reference list if there are sources
-        if source_map:
-            reference_list = "\n".join([f"{num} {key}" for key, num in source_map.items()])
-            context_str += f"\n--- Available References ---\n{reference_list}\n"
-        return context_str
-
-    def run(self, query: str) -> str:
-        logger.info(f"\U0001F7E2 Agent starting run for persona '{self.persona}' with query: '{query}'")
-
-        retrieval_plan = self.router.get_retrieval_plan(self.persona)
-        retrieved_context: List[ContextItem] = []
-
-        # Retrieve from vector stores first
-        unique_content = set()
-        for config in retrieval_plan.namespaces:
-            logger.info(f"\U0001F50D Executing vector search on namespace: {config.namespace} with top_k: {config.top_k}")
-            # This now correctly calls the function in retrievers.py
-            pinecone_results = retrievers.vector_search(query=query, namespace=config.namespace, top_k=config.top_k)
-            for res in pinecone_results:
-                if res.content not in unique_content:
-                    retrieved_context.append(res)
-                    unique_content.add(res.content)
+class Agent:
+    def __init__(self, confidence_threshold: float = 0.85):
+        self.classifier = QueryClassifier()
+        self.planner = ToolPlanner(coverage_threshold=confidence_threshold)
+        self.router = ToolRouter()
         
-        # Then, attempt to retrieve from graph store
-        cypher_query = self._generate_cypher(query)
-        if cypher_query:
-            logger.info(f"\U0001F578️ Executing graph search with Cypher: {cypher_query}")
-            # This now correctly calls the function in retrievers.py
-            graph_results = retrievers.graph_search(cypher_query=cypher_query)
-            retrieved_context.extend(graph_results)
+        genai_client = get_google_ai_client()
+        if genai_client:
+            self.llm = genai_client.GenerativeModel('gemini-1.5-pro-latest')
+        else:
+            self.llm = None
+            logger.error("FATAL: Gemini client could not be initialized. Agent synthesis will fail.")
 
-        if not retrieved_context:
-            logger.warning("No information found from any retriever.")
-            return "Based on the information available to me, I could not find a sufficient answer to your question."
+    def _format_context_for_synthesis(self, results: List[ToolResult]) -> str:
+        context_str = ""
+        for res in results:
+            if res.success and res.content and "no relevant information" not in res.content.lower():
+                context_str += f"--- Evidence from Tool: {res.tool_name} ---\n"
+                context_str += f"{res.content.strip()}\n\n"
+        return context_str.strip()
 
-        logger.info(f"Retrieved {len(retrieved_context)} total context items. Synthesizing answer.")
-        formatted_context = self._format_context_with_citations(retrieved_context)
-        final_prompt = prompts.SYNTHESIS_PROMPT.format(question=query, context_str=formatted_context)
+    def run(self, query: str, persona: str) -> str:
+        """Executes the full agent loop with integrated timing and logging."""
+        # Initialize variables for the log trace
+        query_meta, tool_plan, results, final_answer = None, [], [], ""
+        
+        with Timer() as timer:
+            try:
+                logger.info(f"Agent starting run for persona '{persona}' with query: '{query}'")
 
-        try:
-            final_answer = self.llm.generate_content(final_prompt).text
-        except Exception as e:
-            logger.error(f"Error during final synthesis: {e}")
-            return "I apologize, but I encountered an error while formulating a response."
+                if not self.llm:
+                    return "Error: The AI model for synthesizing answers is not available. Please check API key configuration."
 
-        logger.info("Agent run completed successfully.")
-        return final_answer
+                query_meta = self.classifier.classify(query)
+                if not query_meta:
+                    final_answer = "I'm sorry, I had trouble understanding your question. Could you please rephrase it?"
+                    return final_answer
+
+                tool_plan = self.planner.plan(query_meta, persona)
+                if not tool_plan:
+                    final_answer = "I'm sorry, I don't have a configured strategy to answer that question for your selected persona."
+                    return final_answer
+
+                logger.info(f"Executing tool plan: {[item.tool_name for item in tool_plan]}")
+                for plan_item in tool_plan:
+                    results.append(self.router.execute_tool(plan_item.tool_name, query, query_meta))
+
+                if should_trigger_fallback(results):
+                    final_answer = render_fallback_message(query)
+                    return final_answer
+
+                formatted_context = self._format_context_for_synthesis(results)
+                if not formatted_context:
+                    final_answer = "I was able to search for information but could not find any relevant details to answer your question."
+                    return final_answer
+                
+                final_prompt = SYNTHESIS_PROMPT.format(question=query, context_str=formatted_context)
+                final_answer = self.llm.generate_content(final_prompt).text
+                logger.info("Agent run completed successfully.")
+                return final_answer
+
+            except Exception as e:
+                logger.error(f"An unexpected error occurred during agent run: {e}", exc_info=True)
+                final_answer = f"I encountered a critical error: {e}. Please check the system logs."
+                return final_answer
+
+            finally:
+                # This block ensures that a trace is logged regardless of success or failure.
+                log_trace(query, persona, query_meta, tool_plan, results, final_answer, timer.duration)

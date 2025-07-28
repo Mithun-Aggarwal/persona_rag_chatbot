@@ -1,42 +1,37 @@
-# FILE: config/persona_namespace_map.yml
-# V1.0: Defines the query routing strategy for different user personas.
-# This map links a persona to the Pinecone namespaces they should query to get the most relevant results.
+# FILE: config/persona_tool_map.yml
+# V2.0: Defines the preferred tool strategy for different user personas.
+# This map links a persona to the tools they should use and provides a weight
+# to help the ToolPlanner prioritize. A higher weight indicates a stronger preference.
 
-# A clinical analyst is interested in the raw clinical details and the structured facts (KG).
-# They are less interested in high-level table summaries.
 clinical_analyst:
-  - namespace: "pbac-clinical"  # Primary: Specialized clinical embeddings
+  - tool_name: "retrieve_clinical_data"  # Tool hitting the 'pbac-clinical' namespace
     weight: 1.0
-  - namespace: "pbac-kg"        # Secondary: Structured facts
-    weight: 0.8
-  - namespace: "pbac-text"      # Tertiary: General context
-    weight: 0.5
-
-# A health economist cares most about the high-level summaries of tables (often containing cost-effectiveness data)
-# and the structured facts from the knowledge graph.
-health_economist:
-  - namespace: "pbac-summary"   # Primary: High-level table summaries
-    weight: 1.0
-  - namespace: "pbac-kg"        # Secondary: Structured facts about policies, sponsors, etc.
+  - tool_name: "query_knowledge_graph"    # Tool for structured facts
     weight: 0.9
-  - namespace: "pbac-text"      # Tertiary: General context for financial information
+  - tool_name: "retrieve_general_text"    # Tool hitting 'pbac-text'
+    weight: 0.6
+
+health_economist:
+  - tool_name: "retrieve_summary_data"    # Tool for 'pbac-summary' (costs, tables)
+    weight: 1.0
+  - tool_name: "query_knowledge_graph"
+    weight: 0.8
+  - tool_name: "retrieve_general_text"
     weight: 0.4
 
-# A regulatory specialist needs the broadest possible view: general context, structured facts, and table summaries.
-# They are less concerned with the specialized clinical embeddings.
 regulatory_specialist:
-  - namespace: "pbac-text"      # Primary: General context from text chunks
+  - tool_name: "retrieve_general_text"
     weight: 1.0
-  - namespace: "pbac-kg"        # Secondary: Structured facts about policies and submissions
+  - tool_name: "query_knowledge_graph"
     weight: 0.9
-  - namespace: "pbac-summary"   # Tertiary: High-level summaries of regulatory tables
-    weight: 0.7
-
-# A default or general user gets a balanced search across the primary data stores.
-default:
-  - namespace: "pbac-text"
-    weight: 1.0
-  - namespace: "pbac-summary"
+  - tool_name: "retrieve_summary_data"
     weight: 0.8
-  - namespace: "pbac-kg"
-    weight: 0.6
+
+# A default user gets a balanced search across the primary data stores.
+default:
+  - tool_name: "retrieve_general_text"
+    weight: 1.0
+  - tool_name: "retrieve_summary_data"
+    weight: 0.9
+  - tool_name: "query_knowledge_graph"
+    weight: 0.7

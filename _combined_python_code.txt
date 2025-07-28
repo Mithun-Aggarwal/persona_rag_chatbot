@@ -1,7 +1,162 @@
 ========================================================================
   Combined Python Files from Git Repository: /home/mit/persona_rag_chatbot
-  Generated on: Mon 28 Jul 2025 17:22:59 AEST
+  Generated on: Mon 28 Jul 2025 17:24:19 AEST
 ========================================================================
+
+
+
+########################################################################
+### FILE: retrievers.py
+########################################################################
+
+"""PineconeRetriever v2 — vector search with persona filter + optional re‑rank.
+
+Drop this in `src/retrievers/pinecone.py` and import from `ToolRouter` once you
+replace the earlier stub.  The retriever assumes text chunks are already
+embedded and stored under the configured index name.
+
+Config via ENV
+-------------
+PINECONE_API_KEY       your Pinecone key (required)
+PINECONE_ENVIRONMENT   environment string (default "gcp-starter")
+PINECONE_INDEX_NAME    name of the vector index (required)
+RE_RANK                "true" to enable Cohere re‑rank (optional)
+
+Usage
+-----
+>>> from retrievers.pinecone import PineconeRetriever
+>>> retriever = PineconeRetriever()
+>>> resp = retriever.search("belantamab mafodotin PBAC outcome", top_k=5, persona="clinical")
+>>> print(resp[0].text, resp[0].score)
+"""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import List, Optional
+
+import numpy as np
+
+try:
+    import retrivers.retrievers as retrievers  # type: ignore
+except ImportError as exc:  # pragma: no cover
+    raise RuntimeError("pinecone-client not installed. `pip install pinecone-client`") from exc
+
+# Optional Cohere re-ranker
+try:
+    import cohere  # type: ignore
+except ImportError:
+    cohere = None  # type: ignore
+
+try:
+    from sentence_transformers import SentenceTransformer  # type: ignore
+except ImportError as exc:  # pragma: no cover
+    raise RuntimeError("sentence-transformers required. `pip install sentence-transformers`") from exc
+
+
+@dataclass
+class RetrievalChunk:
+    id: str
+    text: str
+    score: float
+    metadata: dict
+
+
+class PineconeRetriever:
+    """Encapsulates vector search with persona filter + (optional) re‑rank."""
+
+    def __init__(
+        self,
+        model_name: str = "all-mpnet-base-v2",
+        namespace: Optional[str] = None,
+        top_k_default: int = 10,
+    ):
+        self.namespace = namespace
+        self.top_k_default = top_k_default
+        self.re_rank_enabled = os.getenv("RE_RANK", "false").lower() == "true" and cohere is not None
+
+        # --- init Pinecone ---
+        retrievers.init(
+            api_key=os.environ["PINECONE_API_KEY"],
+            environment=os.getenv("PINECONE_ENVIRONMENT", "gcp-starter"),
+        )
+        index_name = os.environ["PINECONE_INDEX_NAME"]
+        self.index = retrievers.Index(index_name)
+
+        # --- embedder ---
+        self.embedder = SentenceTransformer(model_name)
+
+        # --- Cohere client for re‑rank (optional) ---
+        self._co = None
+        if self.re_rank_enabled:
+            self._co = cohere.Client(os.environ.get("COHERE_API_KEY"))
+
+    # ------------------------------------------------------------------
+    def search(
+        self,
+        query: str,
+        *,
+        top_k: int | None = None,
+        persona: str | None = None,
+    ) -> List[RetrievalChunk]:
+        """Return ranked list of RetrievalChunk."""
+
+        vec = self.embedder.encode(query).tolist()
+        top_k = top_k or self.top_k_default
+
+        # Build Pinecone filter
+        filter_dict = {"persona_scores." + persona: {"$gte": 0.7}} if persona else None
+
+        # Query
+        pc_res = self.index.query(
+            vector=vec,
+            top_k=top_k,
+            namespace=self.namespace,
+            include_metadata=True,
+            include_values=False,
+            filter=filter_dict,
+        )
+
+        chunks = [
+            RetrievalChunk(
+                id=match["id"],
+                text=match["metadata"].get("text", ""),
+                score=match["score"],
+                metadata=match["metadata"],
+            )
+            for match in pc_res["matches"]
+        ]
+
+        # Optional re‑rank with Cohere
+        if self.re_rank_enabled and chunks:
+            chunks = self._rerank(query, chunks)
+        return chunks
+
+    # ------------------------------------------------------------------
+    def _rerank(self, query: str, chunks: List[RetrievalChunk]) -> List[RetrievalChunk]:
+        assert self._co, "Cohere client missing"
+        docs = [c.text for c in chunks]
+        rerank_res = self._co.rerank(query=query, documents=docs)
+        # Cohere returns best‑to‑worst indices
+        new_order = [chunks[i] for i in rerank_res["reranked_indices"]]
+        # Update scores to Cohere relevance 0‑1
+        for c, score in zip(new_order, rerank_res["relevance_scores"]):
+            c.score = score
+        return new_order
+
+
+# ---------------------------------------------------------------------------
+# CLI quick test (embedding + search latency)
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    import time
+    import json
+    retriever = PineconeRetriever()
+    q = "belantamab mafodotin pbac positive recommendation"
+    t0 = time.time()
+    out = retriever.search(q, top_k=3, persona="clinical")
+    print(json.dumps([c.__dict__ for c in out], indent=2))
+    print(f"Latency: {time.time() - t0:.2f}s")
 
 
 
@@ -136,6 +291,83 @@ class MainAgent:
 
 
 ########################################################################
+### FILE: src/agent_v2.py
+########################################################################
+
+# FILE: src/agent_v2.py (UPDATED for Phase 3.3 Exception Hardening)
+
+import logging
+from typing import List
+
+from src.models import QueryMetadata, ToolResult
+from src.planner.query_classifier import QueryClassifier
+from src.planner.tool_planner import ToolPlanner
+from src.planner.confidence import ToolConfidenceScorer
+from src.router.tool_router import ToolRouter
+from src.fallback import should_trigger_fallback, render_fallback_message
+from src.middleware.logging import log_trace, Timer
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
+
+class AgentV2:
+    def __init__(self, confidence_threshold: float = 0.9):
+        self.classifier = QueryClassifier()
+        self.planner = ToolPlanner(coverage_threshold=confidence_threshold)
+        self.confidence_scorer = ToolConfidenceScorer(min_threshold=confidence_threshold)
+        self.router = ToolRouter()
+
+    def run(self, query: str) -> str:
+        logger.info(f"AgentV2 received query: {query}")
+
+        with Timer() as timer:
+            try:
+                query_meta = self.classifier.classify(query)
+                if not query_meta:
+                    return "Sorry, I couldn't understand your question. Could you rephrase it?"
+
+                tool_plan = self.planner.plan(query_meta)
+                results: List[ToolResult] = []
+
+                for plan_item in tool_plan:
+                    try:
+                        tool_result = self.router.execute_tool(
+                            plan_item.tool_name, query, query_meta
+                        )
+                    except Exception as e:
+                        logger.error(f"Tool '{plan_item.tool_name}' raised unexpected error: {e}")
+                        tool_result = ToolResult(
+                            tool_name=plan_item.tool_name,
+                            success=False,
+                            content=f"Tool error: {str(e)}",
+                            estimated_coverage=0.0
+                        )
+
+                    tool_result.estimated_coverage = plan_item.estimated_coverage
+                    results.append(tool_result)
+
+                    if self.confidence_scorer.has_sufficient_coverage(results):
+                        logger.info("Coverage threshold met. Stopping early.")
+                        break
+
+                if should_trigger_fallback(results):
+                    return render_fallback_message(query)
+
+                response = self._synthesize_answer([r for r in results if r.success])
+                return response
+
+            finally:
+                if 'query_meta' in locals():
+                    log_trace(query, query_meta, tool_plan, results, timer.duration)
+
+    def _synthesize_answer(self, results: List[ToolResult]) -> str:
+        chunks = [f"[{r.tool_name.upper()}] {r.content}" for r in results if r.content]
+        return "\n---\n".join(chunks)
+
+# Note: all tool errors are now caught per-call, never propagate uncaught exceptions.
+
+
+########################################################################
 ### FILE: src/common_utils.py
 ########################################################################
 
@@ -156,6 +388,380 @@ def get_project_root() -> Path:
     """
     # We assume this file is in 'src/'. The project root is one level up.
     return Path(__file__).parent.parent.resolve()
+
+
+########################################################################
+### FILE: src/config_loader.py
+########################################################################
+
+# src/config_loader.py
+
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from a .env file if it exists
+load_dotenv()
+
+def get_env(variable_name: str, default: str = None) -> str:
+    """Gets an environment variable or returns a default."""
+    value = os.getenv(variable_name)
+    if value is None and default is None:
+        raise ValueError(f"Required environment variable '{variable_name}' is not set.")
+    return value if value is not None else default
+
+# --- API Keys and Environment ---
+GOOGLE_API_KEY = get_env("GOOGLE_API_KEY")
+PINECONE_API_KEY = get_env("PINECONE_API_KEY")
+PINECONE_INDEX_NAME = get_env("PINECONE_INDEX_NAME", "pbac")
+
+# --- Neo4j Database Credentials ---
+NEO4J_URI = get_env("NEO4J_URI")
+NEO4J_USERNAME = get_env("NEO4J_USERNAME", "neo4j")
+NEO4J_PASSWORD = get_env("NEO4J_PASSWORD")
+NEO4J_DATABASE = get_env("NEO4J_DATABASE", "neo4j")
+
+
+########################################################################
+### FILE: src/fallback.py
+########################################################################
+
+# FILE: src/fallback.py
+# Phase 3.1: FallbackLayer — graceful UX when all tools return empty or fail
+
+import logging
+from typing import List
+from src.models import ToolResult
+
+logger = logging.getLogger(__name__)
+
+FALLBACK_QUESTIONS = [
+    "Would you like to compare two drugs instead?",
+    "Can I help you find a sponsor for a specific medicine?",
+    "Do you want to search the original PDF documents directly?"
+]
+
+
+def should_trigger_fallback(results: List[ToolResult]) -> bool:
+    """
+    Returns True if all tools failed or produced no meaningful content.
+    """
+    if not results:
+        logger.info("Fallback triggered: no tool results returned.")
+        return True
+
+    empty_or_failed = [r for r in results if not r.success or not r.content or len(r.content.strip()) < 5]
+    if len(empty_or_failed) == len(results):
+        logger.info("Fallback triggered: all tools failed or content was empty.")
+        return True
+
+    return False
+
+
+def render_fallback_message(query: str) -> str:
+    """
+    Returns a polite fallback message with suggested next questions.
+    """
+    msg = f"""
+I'm sorry — based on the current documents and tools, I couldn't find sufficient information to answer your question:
+
+"{query}"
+
+However, here are some things you can try next:
+
+"""
+    for i, q in enumerate(FALLBACK_QUESTIONS, start=1):
+        msg += f"{i}. {q}\n"
+
+    msg += "\nYou can also try rephrasing your question for better results."
+    return msg.strip()
+
+
+
+########################################################################
+### FILE: src/middleware/logging.py
+########################################################################
+
+# FILE: src/middleware/logging.py
+# Phase 3.2: LoggingMiddleware — structured trace logs per query execution
+
+import json
+import time
+import logging
+from pathlib import Path
+from typing import List
+from datetime import datetime
+
+from src.models import ToolResult, ToolPlanItem, QueryMetadata
+
+logger = logging.getLogger(__name__)
+
+LOG_PATH = Path("trace_logs.jsonl")  # Can be adjusted per environment
+
+
+def log_trace(
+    query: str,
+    query_meta: QueryMetadata,
+    tool_plan: List[ToolPlanItem],
+    tool_results: List[ToolResult],
+    total_latency_sec: float
+):
+    """
+    Writes a structured JSON line capturing the full agent loop.
+    """
+    trace_record = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "query": query,
+        "intent": query_meta.intent,
+        "graph_suitable": query_meta.question_is_graph_suitable,
+        "keywords": query_meta.keywords,
+        "tool_plan": [t.model_dump() for t in tool_plan],
+        "tool_results": [r.model_dump() for r in tool_results],
+        "total_latency_sec": round(total_latency_sec, 3)
+    }
+
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(trace_record) + "\n")
+        logger.info(f"Trace logged to {LOG_PATH.resolve()}")
+    except Exception as e:
+        logger.error(f"Failed to write trace log: {e}", exc_info=True)
+
+
+# Optional context manager for timing
+class Timer:
+    def __enter__(self):
+        self.start = time.time()
+        return self
+
+    def __exit__(self, *args):
+        self.end = time.time()
+        self.duration = self.end - self.start
+
+
+########################################################################
+### FILE: src/models.py
+########################################################################
+
+from pydantic import BaseModel
+from typing import List, Optional, Literal
+
+
+QueryIntent = Literal[
+    "specific_fact_lookup",
+    "simple_summary",
+    "comparative_analysis",
+    "general_qa",
+    "unknown"
+]
+
+
+class QueryMetadata(BaseModel):
+    intent: QueryIntent
+    keywords: List[str]
+    question_is_graph_suitable: bool
+
+
+class ToolPlanItem(BaseModel):
+    tool_name: str
+    estimated_coverage: float
+
+
+class ToolResult(BaseModel):
+    tool_name: str
+    success: bool
+    content: str
+    estimated_coverage: float = 0.0
+
+
+class ContextItem(BaseModel):
+    content: str
+    source: Optional[dict] = None
+
+
+class Source(BaseModel):
+    type: str
+    document_id: Optional[str] = None
+    page_numbers: Optional[List[int]] = None
+    source_url: Optional[str] = None
+    retrieval_score: Optional[float] = None
+    query: Optional[str] = None
+
+class NamespaceConfig(BaseModel):
+    namespace: str
+    weight: float
+    top_k: int
+
+class RetrievalPlan(BaseModel):
+    namespaces: List[NamespaceConfig] = []
+
+
+########################################################################
+### FILE: src/planner/confidence.py
+########################################################################
+
+# FILE: src/planner/confidence.py
+# Phase 1.3: ToolConfidenceScorer — measures cumulative information coverage from tool results
+
+import logging
+from typing import List
+from src.models import ToolResult
+
+logger = logging.getLogger(__name__)
+
+class ToolConfidenceScorer:
+    """
+    Recomputes cumulative coverage score after each tool reply based on:
+    - Number of unique content blocks retrieved
+    - Citation span coverage (placeholder)
+    - Matching keywords (optional)
+    """
+    def __init__(self, min_threshold: float = 0.9):
+        self.coverage_threshold = min_threshold
+
+    def compute_total_coverage(self, results: List[ToolResult]) -> float:
+        """Computes cumulative estimated coverage based on tool-level metadata."""
+        total_coverage = sum([r.estimated_coverage for r in results if r.success])
+        logger.info(f"Total cumulative coverage: {total_coverage:.2f}")
+        return round(total_coverage, 3)
+
+    def has_sufficient_coverage(self, results: List[ToolResult]) -> bool:
+        coverage = self.compute_total_coverage(results)
+        return coverage >= self.coverage_threshold
+
+# Test block
+if __name__ == "__main__":
+    from src.models import ToolResult
+
+    results = [
+        ToolResult(tool_name="pinecone", estimated_coverage=0.6, success=True),
+        ToolResult(tool_name="neo4j", estimated_coverage=0.35, success=True),
+        ToolResult(tool_name="pdf", estimated_coverage=0.2, success=False)
+    ]
+
+    scorer = ToolConfidenceScorer()
+    print("Coverage met:", scorer.has_sufficient_coverage(results))
+
+
+
+########################################################################
+### FILE: src/planner/query_classifier.py
+########################################################################
+
+# FILE: src/planner/query_classifier.py
+# Phase 1.1: QueryClassifier — interprets user query using Gemini and returns structured metadata
+
+import logging
+import google.generativeai as genai
+from typing import Optional
+from src.models import QueryMetadata
+from src.prompts import QUERY_CLASSIFICATION_PROMPT
+
+logger = logging.getLogger(__name__)
+
+class QueryClassifier:
+    def __init__(self):
+        self.model = genai.GenerativeModel('gemini-1.5-flash-latest')
+
+    def classify(self, query: str) -> Optional[QueryMetadata]:
+        """Classifies a user query into intent, keywords, and graph suitability."""
+        logger.info(f"Classifying query: {query}")
+        try:
+            prompt = QUERY_CLASSIFICATION_PROMPT + f"\n\nUser Query: {query}"
+            response = self.model.generate_content(prompt)
+            parsed_json = response.text.strip()
+            metadata = QueryMetadata.model_validate_json(parsed_json)
+            logger.info(f"Classification result: {metadata.model_dump_json(indent=2)}")
+            return metadata
+        except Exception as e:
+            logger.error(f"Query classification failed: {e}")
+            return None
+
+# Unit test: test with canned queries
+if __name__ == "__main__":
+    qc = QueryClassifier()
+    test_queries = [
+        "What company sponsors Abaloparatide?",
+        "Compare the clinical outcomes of Drug A vs Drug B",
+        "Tell me about submissions for lung cancer.",
+        "What is the patient population for the March 2025 submission?"
+    ]
+    for q in test_queries:
+        print(qc.classify(q))
+
+
+
+########################################################################
+### FILE: src/planner/tool_planner.py
+########################################################################
+
+# FILE: src/planner/tool_planner.py
+# Phase 1.2: ToolPlanner — scores available tools based on query intent and persona coverage
+
+import logging
+from typing import List, Tuple
+from src.models import QueryMetadata, ToolPlanItem
+
+logger = logging.getLogger(__name__)
+
+# Hardcoded example scoring logic for Phase 1.2
+# Format: (intent, tool_name) -> base score
+INTENT_TOOL_SCORES = {
+    ("specific_fact_lookup", "neo4j"): 0.9,
+    ("specific_fact_lookup", "pinecone"): 0.6,
+    ("simple_summary", "pinecone"): 0.85,
+    ("simple_summary", "neo4j"): 0.4,
+    ("comparative_analysis", "pinecone"): 0.8,
+    ("comparative_analysis", "neo4j"): 0.6,
+    ("general_qa", "pinecone"): 0.7,
+    ("general_qa", "neo4j"): 0.5
+}
+
+DEFAULT_SCORE = 0.3
+
+class ToolPlanner:
+    def __init__(self, coverage_threshold: float = 0.9):
+        self.coverage_threshold = coverage_threshold
+
+    def plan(self, query_meta: QueryMetadata) -> List[ToolPlanItem]:
+        """Returns a ranked list of ToolPlanItems until coverage ≥ threshold."""
+        logger.info(f"Planning tools for intent: {query_meta.intent}")
+        ordered_tools: List[ToolPlanItem] = []
+        tools = ["neo4j", "pinecone"]
+
+        # Assign intent-based score (later refine with persona-aware logic)
+        tool_scores: List[Tuple[str, float]] = []
+        for tool in tools:
+            score = INTENT_TOOL_SCORES.get((query_meta.intent, tool), DEFAULT_SCORE)
+            tool_scores.append((tool, score))
+
+        # Sort by descending score
+        tool_scores.sort(key=lambda x: x[1], reverse=True)
+
+        total_coverage = 0.0
+        for tool, score in tool_scores:
+            if total_coverage >= self.coverage_threshold:
+                break
+            ordered_tools.append(ToolPlanItem(tool_name=tool, estimated_coverage=score))
+            total_coverage += score
+
+        logger.info(f"Tool plan result: {[t.model_dump() for t in ordered_tools]}")
+        return ordered_tools
+
+# Optional test block
+if __name__ == "__main__":
+    from src.models import QueryMetadata
+
+    mock_meta = QueryMetadata(
+        intent="specific_fact_lookup",
+        keywords=["Abaloparatide", "sponsor"],
+        question_is_graph_suitable=True
+    )
+
+    planner = ToolPlanner()
+    plan = planner.plan(mock_meta)
+    for item in plan:
+        print(item.model_dump_json(indent=2))
+
 
 
 ########################################################################
@@ -211,6 +817,527 @@ You are an AI assistant, an 'Inter-Expert Interpreter'. Your role is to deliver 
 
 **ANSWER:**
 """
+
+
+########################################################################
+### FILE: src/retrievers.py
+########################################################################
+
+# src/retrievers.py
+
+"""
+Modular data retrieval functions ("retrievers").
+
+Each function here is responsible for fetching data from a single source
+(e.g., Pinecone, Neo4j) and returning it in a standardized format.
+This module imports low-level clients from `src.tools`.
+"""
+import logging
+from typing import List, Dict, Any
+
+import neo4j
+import google.generativeai as genai
+
+from src import tools  # Correct: Import the module itself
+from src.models import ContextItem, Source
+
+logger = logging.getLogger(__name__)
+
+
+def vector_search(query: str, namespace: str, top_k: int) -> List[ContextItem]:
+    """Performs semantic search on a Pinecone namespace and returns standardized context."""
+    embedding_client = tools.get_google_ai_client()
+    pinecone_index = tools.get_pinecone_index()
+
+    if not all([embedding_client, pinecone_index]):
+        logger.error("Vector search failed: Pinecone or Google AI client not available.")
+        return []
+
+    try:
+        query_embedding_result = genai.embed_content(
+            model='models/embedding-001',
+            content=query,
+            task_type="retrieval_query"
+        )
+        query_embedding = query_embedding_result['embedding']
+
+        results = pinecone_index.query(
+            namespace=namespace,
+            vector=query_embedding,
+            top_k=top_k,
+            include_metadata=True
+        )
+
+        processed_results = []
+        for match in results.get('matches', []):
+            metadata = match.get('metadata', {})
+            content = metadata.get('source_text_preview') or metadata.get('text', 'No content available.')
+
+            page_numbers_raw = metadata.get("page_numbers")
+            if isinstance(page_numbers_raw, str):
+                try:
+                    page_numbers = eval(page_numbers_raw)
+                except:
+                    page_numbers = []
+            elif isinstance(page_numbers_raw, list):
+                page_numbers = page_numbers_raw
+            else:
+                page_numbers = []
+
+            source = Source(
+                document_id=metadata.get("doc_id"),
+                page_numbers=page_numbers,
+                source_url=metadata.get("source_pdf_url"),
+                retrieval_score=match.get('score', 0.0),
+                type="vector_chunk"
+            )
+            processed_results.append(ContextItem(content=content, source=source))
+
+        logger.info(f"Vector search in '{namespace}' with top_k={top_k} found {len(processed_results)} results.")
+        return processed_results
+
+    except Exception as e:
+        logger.error(f"An error occurred during vector search in namespace '{namespace}': {e}")
+        return []
+
+
+# --- THIS IS THE CRITICAL FIX ---
+# The helper function is defined LOCALLY within this file.
+# It is NOT imported from src.tools.
+def _serialize_path(path: neo4j.graph.Path) -> (str, Dict[str, Any]):
+    """Helper to convert a Neo4j Path into a text representation and source dict."""
+    nodes_str = []
+    all_pages = set()
+    all_docs = set()
+
+    for i, node in enumerate(path.nodes):
+        node_label = next(iter(node.labels), "Node")
+        name = node.get('name', node.get('id', 'Unknown'))
+        nodes_str.append(f"({name}:{node_label})")
+        if i < len(path.relationships):
+            rel = path.relationships[i]
+            nodes_str.append(f"-[{rel.type}]->")
+
+            doc_id = rel.get("doc_id")
+            page_num = rel.get("page_number")
+            if doc_id:
+                all_docs.add(doc_id)
+            if page_num:
+                all_pages.add(str(page_num))
+
+    path_repr = "".join(nodes_str)
+    
+    source_info = {
+        "type": "graph_path",
+        "document_id": ", ".join(sorted(list(all_docs))) if all_docs else "N/A",
+        "page_numbers": sorted(list(all_pages))
+    }
+    return path_repr, source_info
+
+
+def graph_search(cypher_query: str) -> List[ContextItem]:
+    """Executes a Cypher query and returns standardized context."""
+    driver = tools.get_neo4j_driver() # This import is correct.
+    if not driver:
+        logger.error("Graph search failed: Neo4j driver not available.")
+        return []
+
+    results = []
+    try:
+        with driver.session() as session:
+            records, _, _ = session.execute_query(cypher_query)
+
+            for record in records:
+                path = record.get("p")
+                if path and isinstance(path, neo4j.graph.Path):
+                    # It now calls the LOCAL _serialize_path function.
+                    content_str, source_info = _serialize_path(path)
+                    source_info['query'] = cypher_query
+                    source = Source(**source_info)
+                    results.append(ContextItem(content=content_str, source=source))
+                else:
+                    content_str = str(record.data())
+                    source = Source(type="graph_record", query=cypher_query)
+                    results.append(ContextItem(content=content_str, source=source))
+
+            logger.info(f"Graph search with Cypher query returned {len(results)} results.")
+            return results
+    except Exception as e:
+        logger.error(f"An error occurred during graph search: {e}")
+        return [ContextItem(
+            content=f"Failed to execute Cypher query due to an error: {e}",
+            source=Source(type="error", query=cypher_query)
+        )]
+
+
+########################################################################
+### FILE: src/retrievers/__init__.py
+########################################################################
+
+# FILE: src/retrievers/__init__.py
+
+from .pinecone import vector_search
+from .neo4j_graph import graph_search
+from .pdf_live import run_pdf_retriever
+
+__all__ = ["vector_search", "graph_search", "run_pdf_retriever"]
+
+
+
+########################################################################
+### FILE: src/retrievers/neo4j_graph.py
+########################################################################
+
+# FILE: src/retrievers/neo4j_graph.py
+# Phase 2.3: Neo4jGraphAgent — safe Cypher runner with relationship path output
+
+import logging
+from typing import List
+from neo4j import GraphDatabase, exceptions
+
+from src.models import ToolResult, QueryMetadata
+from src.tools import get_neo4j_driver, serialize_neo4j_path
+
+logger = logging.getLogger(__name__)
+
+
+def run_neo4j_search(query: str, query_meta: QueryMetadata) -> ToolResult:
+    """
+    Executes Cypher query safely. First dry-runs with RETURN 1 to validate.
+    If valid, executes and serializes relationship paths.
+    """
+    driver = get_neo4j_driver()
+    if not driver:
+        return ToolResult(tool_name="neo4j", success=False, content="Neo4j driver not available.")
+
+    cypher = generate_cypher(query, query_meta)
+    if not cypher:
+        return ToolResult(tool_name="neo4j", success=False, content="Query not graph-suitable or no Cypher generated.")
+
+    if not _is_valid_cypher(driver, cypher):
+        return ToolResult(tool_name="neo4j", success=False, content="Generated Cypher query failed validation.")
+
+    try:
+        with driver.session() as session:
+            records = session.run(cypher)
+            paths = []
+
+            for rec in records:
+                p = rec.get("p")
+                if p:
+                    paths.append(serialize_neo4j_path(p))
+                else:
+                    paths.append(str(rec))
+
+            if not paths:
+                return ToolResult(tool_name="neo4j", success=False, content="No matching graph paths found.")
+
+            return ToolResult(tool_name="neo4j", success=True, content="\n---\n".join(paths))
+    except Exception as e:
+        logger.error(f"Neo4j query failed: {e}", exc_info=True)
+        return ToolResult(tool_name="neo4j", success=False, content=f"Error during execution: {e}")
+
+
+def generate_cypher(query: str, query_meta: QueryMetadata) -> str:
+    """Placeholder Cypher generation. Later replaced with LLM-based logic."""
+    if not query_meta.question_is_graph_suitable:
+        return ""
+    return f"MATCH p=(d:Drug)-[r]->(x) WHERE d.name CONTAINS '{query_meta.keywords[0]}' RETURN p LIMIT 5"
+
+
+def _is_valid_cypher(driver, cypher: str) -> bool:
+    try:
+        with driver.session() as session:
+            test_query = f"CALL {{ {cypher} }} RETURN 1"
+            session.run(test_query)
+            return True
+    except exceptions.CypherSyntaxError as e:
+        logger.warning(f"Dry-run validation failed: {e}")
+        return False
+
+
+
+########################################################################
+### FILE: src/retrievers/pdf_live.py
+########################################################################
+
+# FILE: src/retrievers/pdf_live.py
+# Phase 2.4: PDFLiveRetriever — stream, extract, and embed up to 3 PDFs or 100 pages total
+
+import logging
+import tempfile
+import requests
+from typing import List
+
+from src.models import ToolResult, QueryMetadata
+from src.tools import extract_pdf_text, get_google_ai_client, get_pinecone_index, stream_pdf_metadata
+
+logger = logging.getLogger(__name__)
+
+MAX_PDFS = 3
+MAX_TOTAL_PAGES = 100
+
+
+def run_pdf_retriever(query: str, query_meta: QueryMetadata) -> ToolResult:
+    """
+    Loads and processes up to 3 PDFs (or 100 pages total) from public URLs.
+    Uses Google Embed API to get semantic representation and return top chunks.
+    """
+    try:
+        pdf_links = stream_pdf_metadata(query_meta.keywords, max_docs=MAX_PDFS)
+        if not pdf_links:
+            return ToolResult(tool_name="pdf", success=False, content="No public PDFs matched keywords.")
+
+        embedding_client = get_google_ai_client()
+        pinecone_index = get_pinecone_index()
+        query_embedding = embedding_client.embed_content(query=query, model="models/embedding-001", task_type="retrieval_query")["embedding"]
+
+        total_pages, all_chunks = 0, []
+        for url in pdf_links:
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp:
+                r = requests.get(url, timeout=20)
+                tmp.write(r.content)
+                tmp.flush()
+
+                chunks = extract_pdf_text(tmp.name)
+                if not chunks: continue
+
+                all_chunks.extend(chunks)
+                total_pages += len(chunks)
+                if total_pages >= MAX_TOTAL_PAGES:
+                    break
+
+        if not all_chunks:
+            return ToolResult(tool_name="pdf", success=False, content="Could not extract any text from public PDFs.")
+
+        # Embed all chunks and score against query
+        embedded_chunks = embedding_client.embed_contents(
+            model="models/embedding-001",
+            contents=[c["text"] for c in all_chunks],
+            task_type="retrieval_document"
+        )["embeddings"]
+
+        scored = [
+            (chunk, _cosine_similarity(e, query_embedding))
+            for chunk, e in zip(all_chunks, embedded_chunks)
+        ]
+        top_matches = sorted(scored, key=lambda x: -x[1])[:5]
+
+        snippet = "\n---\n".join(f"• {c['text'][:500]}..." for c, _ in top_matches)
+        return ToolResult(tool_name="pdf", success=True, content=snippet)
+
+    except Exception as e:
+        logger.error(f"PDFLiveRetriever failed: {e}", exc_info=True)
+        return ToolResult(tool_name="pdf", success=False, content=f"Error: {e}")
+
+
+def _cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
+    dot = sum(a * b for a, b in zip(vec1, vec2))
+    norm1 = sum(a * a for a in vec1) ** 0.5
+    norm2 = sum(b * b for b in vec2) ** 0.5
+    return dot / (norm1 * norm2 + 1e-8)
+
+
+########################################################################
+### FILE: src/retrievers/pinecone.py
+########################################################################
+
+# FILE: src/retrievers/pinecone.py
+
+import logging
+from typing import List
+from sentence_transformers import SentenceTransformer
+from src.models import ContextItem
+import pinecone
+import os
+
+logger = logging.getLogger(__name__)
+
+# Initialize Pinecone only once
+def _init_pinecone():
+    pinecone_api_key = os.getenv("PINECONE_API_KEY")
+    pinecone_env = os.getenv("PINECONE_ENVIRONMENT")
+    if not pinecone_api_key or not pinecone_env:
+        raise RuntimeError("Pinecone environment not configured.")
+    pinecone.init(api_key=pinecone_api_key, environment=pinecone_env)
+
+# Main vector search function
+def vector_search(query: str, namespace: str, top_k: int = 10) -> List[ContextItem]:
+    from src.models import Source  # Local import to avoid circular dependency
+
+    _init_pinecone()
+    index_name = os.getenv("PINECONE_INDEX_NAME")
+    if not index_name:
+        raise RuntimeError("PINECONE_INDEX_NAME not set in environment.")
+
+    index = pinecone.Index(index_name)
+
+    logger.info(f"🔎 Performing vector search on Pinecone index '{index_name}' in namespace '{namespace}'")
+
+    model = SentenceTransformer("all-mpnet-base-v2")
+    query_vector = model.encode(query).tolist()
+
+    response = index.query(vector=query_vector, namespace=namespace, top_k=top_k, include_metadata=True)
+    results = []
+    for match in response.matches:
+        metadata = match.metadata
+        results.append(ContextItem(
+            content=metadata.get("text", ""),
+            score=match.score,
+            source=Source(
+                type="pinecone",
+                document_id=metadata.get("doc_id"),
+                page_numbers=[metadata.get("page")],
+                chunk_id=metadata.get("chunk_id"),
+                public_url=metadata.get("public_url")
+            )
+        ))
+
+    return results
+
+
+
+########################################################################
+### FILE: src/router/persona_router.py
+########################################################################
+
+# src/routing/persona_router.py
+
+import logging
+import yaml
+from pathlib import Path
+from typing import List
+
+from src.common_utils import get_project_root
+from src.models import RetrievalPlan, NamespaceConfig # REFACTORED: Use Pydantic models
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
+logger = logging.getLogger(__name__)
+
+# REFACTORED: A constant to scale retrieval depth by weight.
+# A weight of 1.0 will result in top_k=15, 0.5 will result in top_k=7.
+BASE_TOP_K = 15
+
+class PersonaRouter:
+    """
+    Loads a persona-to-namespace map and creates a structured retrieval plan.
+    It translates a persona into a list of weighted, configured namespaces to query.
+    """
+    def __init__(self, map_file_path: Path = None):
+        """
+        Initializes the router by loading the persona-to-namespace map.
+        """
+        if map_file_path is None:
+            self.map_file_path = get_project_root() / "config" / "persona_namespace_map.yml"
+        else:
+            self.map_file_path = map_file_path
+
+        try:
+            with open(self.map_file_path, 'r') as f:
+                self.persona_map = yaml.safe_load(f)
+            logger.info(f"Successfully loaded persona map from {self.map_file_path}")
+        except FileNotFoundError:
+            logger.error(f"FATAL: Persona map file not found at {self.map_file_path}")
+            # REFACTORED: Raise an exception instead of calling st.error
+            raise
+        except Exception as e:
+            logger.error(f"FATAL: Error loading or parsing persona map file: {e}")
+            self.persona_map = {}
+
+    def get_retrieval_plan(self, persona: str) -> RetrievalPlan:
+        """
+        Gets the structured retrieval plan for a given persona.
+
+        Args:
+            persona: The name of the persona (e.g., 'Clinical Analyst').
+
+        Returns:
+            A RetrievalPlan object containing a list of configured namespaces.
+        """
+        normalized_persona = persona.lower().replace(" ", "_")
+        persona_configs = self.persona_map.get(normalized_persona, self.persona_map.get('default', []))
+
+        if not persona_configs:
+            logger.warning(f"No plan found for persona '{normalized_persona}' or default. Returning empty plan.")
+            return RetrievalPlan()
+
+        # REFACTORED: Create NamespaceConfig models, now using the 'weight'
+        namespace_configs = []
+        for item in persona_configs:
+            weight = item.get('weight', 1.0)
+            # Dynamically calculate top_k based on weight
+            top_k = int(max(3, BASE_TOP_K * weight))
+            
+            config = NamespaceConfig(
+                namespace=item['namespace'],
+                weight=weight,
+                top_k=top_k
+            )
+            namespace_configs.append(config)
+        
+        plan = RetrievalPlan(namespaces=namespace_configs)
+        logger.info(f"Retrieval plan for persona '{persona}': {plan.model_dump_json(indent=2)}")
+        return plan
+
+
+########################################################################
+### FILE: src/router/tool_router.py
+########################################################################
+
+# FILE: src/router/tool_router.py
+# Phase 2.1: ToolRouter — modular dispatcher that executes tools with unified interface
+
+import logging
+from typing import Callable, Dict
+
+from src.models import QueryMetadata, ToolResult
+from src.retrievers.pinecone import run_pinecone_search
+from src.retrievers.neo4j_graph import run_neo4j_search
+
+logger = logging.getLogger(__name__)
+
+class ToolRouter:
+    """
+    Maps tool names to callable functions.
+    This module replaces hardcoded routing with pluggable, extensible logic.
+    """
+
+    def __init__(self):
+        self.registry: Dict[str, Callable[[str, QueryMetadata], ToolResult]] = {
+            "pinecone": run_pinecone_search,
+            "neo4j": run_neo4j_search,
+            # Future: "pdf": run_pdf_retriever,
+        }
+
+    def execute_tool(self, tool_name: str, query: str, query_meta: QueryMetadata) -> ToolResult:
+        logger.info(f"[ToolRouter] Executing: {tool_name}")
+        fn = self.registry.get(tool_name)
+
+        if not fn:
+            logger.warning(f"[ToolRouter] Tool '{tool_name}' not found. Returning fallback result.")
+            return ToolResult(tool_name=tool_name, success=False, content="[Tool not implemented]", estimated_coverage=0.0)
+
+        try:
+            return fn(query, query_meta)
+        except Exception as e:
+            logger.error(f"[ToolRouter] Tool '{tool_name}' failed: {e}", exc_info=True)
+            return ToolResult(tool_name=tool_name, success=False, content=f"Tool error: {e}", estimated_coverage=0.0)
+
+
+# Optional test block
+if __name__ == "__main__":
+    from src.models import QueryMetadata
+
+    meta = QueryMetadata(
+        intent="specific_fact_lookup",
+        keywords=["Abaloparatide"],
+        question_is_graph_suitable=True
+    )
+
+    router = ToolRouter()
+    result = router.execute_tool("neo4j", "What company sponsors Abaloparatide?", meta)
+    print(result.model_dump_json(indent=2))
+
 
 
 ########################################################################
@@ -346,6 +1473,79 @@ def get_neo4j_schema() -> str:
     except Exception as e:
         logger.error(f"Failed to retrieve Neo4j schema: {e}")
         return f"Error retrieving schema: {e}"
+
+
+########################################################################
+### FILE: src/tools/client.py
+########################################################################
+
+# src/tools/clients.py
+
+import os
+import logging
+import pinecone
+import google.generativeai as genai
+from neo4j import GraphDatabase, Driver
+
+from src import config_loader
+
+logger = logging.getLogger(__name__)
+
+# --- Singleton instances to avoid re-initializing ---
+_google_ai_client = None
+_pinecone_index = None
+_neo4j_driver = None
+
+def get_google_ai_client():
+    """Initializes and returns the Google Generative AI client."""
+    global _google_ai_client
+    if _google_ai_client is None:
+        try:
+            genai.configure(api_key=config_loader.GOOGLE_API_KEY)
+            _google_ai_client = genai
+            logger.info("Successfully initialized Google AI client.")
+        except Exception as e:
+            logger.error(f"Failed to initialize Google AI client: {e}")
+            raise
+    return _google_ai_client
+
+def get_pinecone_index():
+    """Initializes and returns the Pinecone index handle."""
+    global _pinecone_index
+    if _pinecone_index is None:
+        try:
+            pc = pinecone.Pinecone(api_key=config_loader.PINECONE_API_KEY)
+            index_name = config_loader.PINECONE_INDEX_NAME
+            _pinecone_index = pc.Index(index_name)
+            logger.info(f"Successfully connected to Pinecone index '{index_name}'.")
+        except Exception as e:
+            logger.error(f"Failed to initialize Pinecone index: {e}")
+            raise
+    return _pinecone_index
+
+def get_neo4j_driver() -> Driver:
+    """Initializes and returns the Neo4j driver."""
+    global _neo4j_driver
+    if _neo4j_driver is None:
+        try:
+            _neo4j_driver = GraphDatabase.driver(
+                config_loader.NEO4J_URI,
+                auth=(config_loader.NEO4J_USERNAME, config_loader.NEO4J_PASSWORD)
+            )
+            _neo4j_driver.verify_connectivity()
+            logger.info("Successfully connected to Neo4j database.")
+        except Exception as e:
+            logger.error(f"Failed to initialize Neo4j driver: {e}")
+            raise
+    return _neo4j_driver
+
+def close_neo4j_driver():
+    """Closes the Neo4j driver connection if it exists."""
+    global _neo4j_driver
+    if _neo4j_driver:
+        _neo4j_driver.close()
+        _neo4j_driver = None
+        logger.info("Neo4j driver closed.")
 
 
 ########################################################################
@@ -486,3 +1686,54 @@ if prompt:
 
     # Rerun to clear the input box if a button was used, or to reflect the new state
     st.rerun()
+
+
+########################################################################
+### FILE: tests/planner/test_query_classifier.py
+########################################################################
+
+"""Unit tests for QueryClassifier.
+
+Run with:
+    pytest -q tests/planner/test_query_classifier.py
+"""
+from src.planner.query_classifier import QueryClassifier, QueryMeta, Intent, Complexity
+
+
+def test_basic_classification_stub(monkeypatch):
+    """The stub Gemini client always returns the same JSON → make sure mapping works."""
+
+    qc = QueryClassifier()
+    q = "What is the PBAC outcome for belantamab mafodotin?"
+    meta: QueryMeta = qc(q)
+
+    assert isinstance(meta, QueryMeta)
+    assert meta.intent in {"factual", "comparative", "procedural", "citation", "other"}
+    assert meta.complexity in {"simple", "moderate", "complex"}
+    assert 0 <= meta.confidence_needed <= 1
+
+    # Stub response in query_classifier.GeminiClient.call_gemini → 'factual', 'simple', 0.75
+    assert meta.intent == "factual"
+    assert meta.complexity == "simple"
+    assert meta.confidence_needed == 0.75
+
+
+def test_cache(monkeypatch):
+    """Ensure LRU cache hits (no second Gemini call)."""
+
+    calls = []
+
+    def fake_call(payload):
+        calls.append(payload)
+        return {"intent": "other", "complexity": "moderate", "confidence": 0.5}
+
+    monkeypatch.setattr("src.planner.query_classifier.GeminiClient.call_gemini", fake_call)
+
+    qc = QueryClassifier(cache_size=2)
+    q = "Explain indirect costs in PBAC submissions"
+    first = qc(q)
+    second = qc(q)  # cached
+
+    assert first == second
+    # Gemini called exactly once
+    assert len(calls) == 1

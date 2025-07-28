@@ -1,53 +1,73 @@
 # FILE: src/router/tool_router.py
-# Phase 2.1: ToolRouter — modular dispatcher that executes tools with unified interface
-
+# V2.0: Modular dispatcher for the unified agent.
+"""
+Maps tool names from the planner to callable functions from the tool library.
+This module replaces hardcoded routing with a pluggable, extensible registry.
+"""
 import logging
 from typing import Callable, Dict
 
 from src.models import QueryMetadata, ToolResult
-from src.retrievers.pinecone import run_pinecone_search
-from src.retrievers.neo4j_graph import run_neo4j_search
+from src.tools import retrievers # Import the entire retrievers module
 
 logger = logging.getLogger(__name__)
 
 class ToolRouter:
     """
-    Maps tool names to callable functions.
-    This module replaces hardcoded routing with pluggable, extensible logic.
+    Executes a specific tool by name, providing a unified and safe interface.
     """
-
     def __init__(self):
+        """
+        Initializes the router by creating a registry of all available tools.
+        The keys MUST match the 'tool_name' in `persona_tool_map.yml` and the planner logic.
+        """
         self.registry: Dict[str, Callable[[str, QueryMetadata], ToolResult]] = {
-            "pinecone": run_pinecone_search,
-            "neo4j": run_neo4j_search,
-            # Future: "pdf": run_pdf_retriever,
+            # Vector Search Tools
+            "retrieve_clinical_data": retrievers.retrieve_clinical_data,
+            "retrieve_summary_data": retrievers.retrieve_summary_data,
+            "retrieve_general_text": retrievers.retrieve_general_text,
+            
+            # Graph Search Tool
+            "query_knowledge_graph": retrievers.query_knowledge_graph,
+            
+            # Future tools can be added here easily:
+            # "search_live_web": tools.search_live_web,
         }
+        logger.info(f"ToolRouter initialized with {len(self.registry)} tools: {list(self.registry.keys())}")
 
     def execute_tool(self, tool_name: str, query: str, query_meta: QueryMetadata) -> ToolResult:
-        logger.info(f"[ToolRouter] Executing: {tool_name}")
-        fn = self.registry.get(tool_name)
+        """
+        Looks up a tool by name in the registry and executes it.
 
-        if not fn:
-            logger.warning(f"[ToolRouter] Tool '{tool_name}' not found. Returning fallback result.")
-            return ToolResult(tool_name=tool_name, success=False, content="[Tool not implemented]", estimated_coverage=0.0)
+        Args:
+            tool_name: The name of the tool to execute.
+            query: The original user query.
+            query_meta: The structured metadata about the query.
+
+        Returns:
+            A ToolResult object with the outcome of the execution.
+        """
+        logger.info(f"[ToolRouter] Attempting to execute tool: '{tool_name}'")
+        
+        tool_function = self.registry.get(tool_name)
+
+        if not tool_function:
+            logger.warning(f"[ToolRouter] Tool '{tool_name}' not found in registry. Returning a failure result.")
+            return ToolResult(
+                tool_name=tool_name, 
+                success=False, 
+                content="[Error: Tool not implemented or misconfigured]"
+            )
 
         try:
-            return fn(query, query_meta)
+            # Call the registered function with the required arguments
+            return tool_function(query, query_meta)
         except Exception as e:
-            logger.error(f"[ToolRouter] Tool '{tool_name}' failed: {e}", exc_info=True)
-            return ToolResult(tool_name=tool_name, success=False, content=f"Tool error: {e}", estimated_coverage=0.0)
-
-
-# Optional test block
-if __name__ == "__main__":
-    from src.models import QueryMetadata
-
-    meta = QueryMetadata(
-        intent="specific_fact_lookup",
-        keywords=["Abaloparatide"],
-        question_is_graph_suitable=True
-    )
-
-    router = ToolRouter()
-    result = router.execute_tool("neo4j", "What company sponsors Abaloparatide?", meta)
-    print(result.model_dump_json(indent=2))
+            # This is a critical safety net. If a tool fails unexpectedly,
+            # it won't crash the entire agent.
+            logger.error(f"[ToolRouter] Tool '{tool_name}' failed with an unhandled exception: {e}", exc_info=True)
+            return ToolResult(
+                tool_name=tool_name, 
+                success=False, 
+                content=f"An unexpected error occurred in the tool: {e}"
+            )

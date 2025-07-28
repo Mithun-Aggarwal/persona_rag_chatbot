@@ -1,67 +1,70 @@
-# src/tools/clients.py
+# FILE: src/tools/clients.py
+# V2.0: Consolidated, cached client initializers.
+"""
+Single source for initializing and retrieving external service clients.
+Uses caching to prevent re-initialization on every call.
+"""
 
 import os
 import logging
+from functools import lru_cache
+
 import pinecone
+import neo4j
 import google.generativeai as genai
-from neo4j import GraphDatabase, Driver
+from dotenv import load_dotenv
 
-from src import config_loader
-
+load_dotenv()
 logger = logging.getLogger(__name__)
 
-# --- Singleton instances to avoid re-initializing ---
-_google_ai_client = None
-_pinecone_index = None
-_neo4j_driver = None
+# --- Client Initializers (Cached for Performance) ---
 
-def get_google_ai_client():
-    """Initializes and returns the Google Generative AI client."""
-    global _google_ai_client
-    if _google_ai_client is None:
-        try:
-            genai.configure(api_key=config_loader.GOOGLE_API_KEY)
-            _google_ai_client = genai
-            logger.info("Successfully initialized Google AI client.")
-        except Exception as e:
-            logger.error(f"Failed to initialize Google AI client: {e}")
-            raise
-    return _google_ai_client
+@lru_cache(maxsize=1)
+def get_google_ai_client() -> genai:
+    """Initializes and returns the Google AI client."""
+    try:
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise ValueError("GOOGLE_API_KEY environment variable not set.")
+        genai.configure(api_key=api_key)
+        logger.info("Google AI client configured successfully.")
+        return genai
+    except Exception as e:
+        logger.error(f"Failed to configure Google AI client: {e}")
+        return None
 
-def get_pinecone_index():
+@lru_cache(maxsize=1)
+def get_pinecone_index() -> pinecone.Index:
     """Initializes and returns the Pinecone index handle."""
-    global _pinecone_index
-    if _pinecone_index is None:
-        try:
-            pc = pinecone.Pinecone(api_key=config_loader.PINECONE_API_KEY)
-            index_name = config_loader.PINECONE_INDEX_NAME
-            _pinecone_index = pc.Index(index_name)
-            logger.info(f"Successfully connected to Pinecone index '{index_name}'.")
-        except Exception as e:
-            logger.error(f"Failed to initialize Pinecone index: {e}")
-            raise
-    return _pinecone_index
+    try:
+        api_key = os.getenv("PINECONE_API_KEY")
+        index_name = os.getenv("PINECONE_INDEX_NAME")
+        if not api_key or not index_name:
+            raise ValueError("PINECONE_API_KEY or PINECONE_INDEX_NAME not set.")
+        
+        # Updated initialization for latest pinecone-client versions
+        pc = pinecone.Pinecone(api_key=api_key)
+        index = pc.Index(index_name)
+        logger.info(f"Pinecone index '{index_name}' connected successfully.")
+        return index
+    except Exception as e:
+        logger.error(f"Failed to connect to Pinecone index: {e}")
+        return None
 
-def get_neo4j_driver() -> Driver:
+@lru_cache(maxsize=1)
+def get_neo4j_driver() -> neo4j.Driver:
     """Initializes and returns the Neo4j driver."""
-    global _neo4j_driver
-    if _neo4j_driver is None:
-        try:
-            _neo4j_driver = GraphDatabase.driver(
-                config_loader.NEO4J_URI,
-                auth=(config_loader.NEO4J_USERNAME, config_loader.NEO4J_PASSWORD)
-            )
-            _neo4j_driver.verify_connectivity()
-            logger.info("Successfully connected to Neo4j database.")
-        except Exception as e:
-            logger.error(f"Failed to initialize Neo4j driver: {e}")
-            raise
-    return _neo4j_driver
+    try:
+        uri = os.getenv("NEO4J_URI")
+        user = os.getenv("NEO4J_USERNAME", "neo4j")
+        password = os.getenv("NEO4J_PASSWORD")
+        if not all([uri, user, password]):
+            raise ValueError("Neo4j connection details (URI, USERNAME, PASSWORD) not set.")
 
-def close_neo4j_driver():
-    """Closes the Neo4j driver connection if it exists."""
-    global _neo4j_driver
-    if _neo4j_driver:
-        _neo4j_driver.close()
-        _neo4j_driver = None
-        logger.info("Neo4j driver closed.")
+        driver = neo4j.GraphDatabase.driver(uri, auth=(user, password))
+        driver.verify_connectivity()
+        logger.info("Neo4j driver connected successfully.")
+        return driver
+    except Exception as e:
+        logger.error(f"Failed to create Neo4j driver: {e}")
+        return None

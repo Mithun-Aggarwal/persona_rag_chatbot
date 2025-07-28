@@ -1,11 +1,12 @@
 # FILE: streamlit_app.py
-# V2.4: Updated evaluation questions to align with 2024 data and added more open-ended queries.
+# V2.8: Passes chat history to the agent to enable conversational memory.
 
 import streamlit as st
 import logging
 import os
 from dotenv import load_dotenv
 
+# ... (imports and config are unchanged) ...
 # --- CRITICAL: Load environment variables at the very top ---
 load_dotenv()
 
@@ -17,13 +18,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Configure logging for YOUR application. We want to see INFO messages.
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - [%(levelname)s] - [%(name)s:%(lineno)d] - %(message)s'
 )
-
-# Tame the noisy loggers from the Streamlit framework and other libraries.
 logging.getLogger('streamlit').setLevel(logging.WARNING)
 logging.getLogger('watchdog').setLevel(logging.WARNING)
 logging.getLogger('PIL').setLevel(logging.WARNING)
@@ -41,15 +39,11 @@ if "agent" not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "current_persona" not in st.session_state:
-    st.session_state.current_persona = "clinical_analyst"
+    st.session_state.current_persona = "automatic"
 
-# --- Helper Functions ---
+# ... (helper functions and sidebar are unchanged) ...
 @st.cache_resource
 def initialize_agent():
-    """
-    Initializes the agent once and caches it.
-    Returns the agent instance or None if initialization fails.
-    """
     if not get_google_ai_client():
         st.error("Google API Key is not configured. Please set the GOOGLE_API_KEY in your .env file.", icon="🚨")
         return None
@@ -63,17 +57,17 @@ def initialize_agent():
         return None
 
 def reset_chat(persona_name: str):
-    """Resets the chat history for a new conversation."""
+    display_name = "Automatic" if persona_name == "Automatic (Recommended)" else persona_name
     st.session_state.messages = [
-        {"role": "assistant", "content": f"Hi! I'm now acting as a **{persona_name}**. How can I help you?"}
+        {"role": "assistant", "content": f"Hi! I'm now acting in **{display_name}** mode. How can I help you?"}
     ]
 
-# --- Sidebar ---
 with st.sidebar:
     st.header("🤖 Persona RAG Chatbot")
     st.markdown("Select a persona to tailor my retrieval strategy and answers to your specific role.")
 
     persona_options = {
+        'Automatic (Recommended)': 'automatic',
         'Clinical Analyst': 'clinical_analyst',
         'Health Economist': 'health_economist',
         'Regulatory Specialist': 'regulatory_specialist',
@@ -82,7 +76,7 @@ with st.sidebar:
     current_display_name = [k for k, v in persona_options.items() if v == st.session_state.current_persona][0]
     
     selected_persona_name = st.radio(
-        "**Choose your Persona:**",
+        "**Choose your Mode:**",
         options=persona_options.keys(),
         index=list(persona_options.keys()).index(current_display_name),
         key="persona_selector"
@@ -103,54 +97,60 @@ with st.sidebar:
     st.divider()
     st.header("🧪 Evaluation Questions")
     st.markdown("Use these questions to test the agent's capabilities with the 2024 data.")
-
-    # --- START OF DEFINITIVE FIX: Updated Evaluation Questions for 2024 data ---
-    with st.expander("🎯 Fact Retrieval (High Precision)", expanded=True):
+    with st.expander("🎯 Fact Retrieval (2024 Data)", expanded=True):
         questions = {
             "Sponsor Lookup (Dec 2024)": "Who is the sponsor for Esketamine?",
             "Indication Lookup (July 2024)": "What condition is Belzutifan used to treat?",
             "Trade Name Lookup (March 2024)": "What is the trade name for Aflibercept?",
-            "Dosage Form (May 2024)": "What is the dosage form of the Respiratory Syncytial Virus Vaccine?",
+            "Dosage Form (Sept 2024)": "What is the dosage form for Fruquintinib?",
         }
         for name, q in questions.items():
             if st.button(f"{name}: {q}", key=q, use_container_width=True):
                 st.session_state.run_prompt = q
-
-    with st.expander("⚖️ Comparative Analysis"):
+    with st.expander("⚖️ Comparative Analysis (2024 Data)"):
         questions = {
-            "Compare drugs for same condition": "Compare Aflibercept and Adalimumab for eye-related conditions.",
-            "Compare submissions across meetings": "What drugs were submitted by Bayer in the May 2024 and March 2024 meetings?",
-            "Open-ended comparison": "What are the differences between a 'New PBS listing' and a 'Change to existing listing' based on the agenda documents?",
+            "Compare Submissions (March vs July)": "Compare the submissions for Adalimumab in the March 2024 and July 2024 PBAC meetings.",
+            "Find Common Sponsor": "Which company submitted drugs in both the March 2024 and May 2024 meetings?",
+            "Open-ended Definition": "What are the differences between a 'New PBS listing' and a 'Change to existing listing' based on the agenda documents?",
         }
         for name, q in questions.items():
             if st.button(q, key=q, use_container_width=True):
                 st.session_state.run_prompt = q
-    
-    with st.expander("📋 Summarization"):
+    with st.expander("📋 Summarization (2024 Data)"):
         questions = {
-            "Summarize a meeting": "Provide a summary of the key submissions from the May 2024 intracycle meeting.",
-            "Summarize by theme": "Summarize all submissions related to cancer treatment across all 2024 documents.",
-            "Open-ended synthesis": "Based on the agendas, what appears to be the main focus of the PBAC's work in 2024?",
+            "Summarize a Meeting": "Provide a summary of the key submissions from the May 2024 intracycle meeting.",
+            "Summarize by Theme": "Summarize all submissions related to cancer treatment across all 2024 documents.",
+            "Synthesize High-Level Goal": "Based on the agendas, what appears to be the main focus of the PBAC's work in 2024?",
         }
         for name, q in questions.items():
             if st.button(q, key=q, use_container_width=True):
                 st.session_state.run_prompt = q
-
     with st.expander("🤔 Challenging / Ambiguous Questions"):
         questions = {
-            "Test data boundaries": "What was the final PBAC decision on Fruquintinib from the September 2024 meeting?",
-            "Broad, multi-hop query": "Find sponsors who made submissions for both auto-immune diseases and cancer in 2024.",
-            "Test fallback logic (no price)": "What is the price of Aflibercept?",
-            "Out of scope (external knowledge)": "What are the latest EMA guidelines for vaccine submissions?",
+            "Test Data Boundaries": "What was the PBAC's final decision on Osilodrostat from the September 2024 meeting?",
+            "Broad, Multi-Hop Query": "Find sponsors who made submissions for both auto-immune diseases and cancer in 2024.",
+            "Test Fallback Logic (No Price)": "What is the price of Aflibercept?",
+            "Out of Scope (External Knowledge)": "What are the latest EMA guidelines for vaccine submissions?",
         }
         for name, q in questions.items():
             if st.button(q, key=q, use_container_width=True):
                 st.session_state.run_prompt = q
-    # --- END OF DEFINITIVE FIX ---
 
 # --- Main Chat Interface ---
 st.title("Persona-Aware RAG Agent")
-st.caption(f"Currently acting as: **{selected_persona_name}**")
+if st.session_state.current_persona == "automatic":
+    st.caption("Currently in **Automatic Mode** (selects best persona per query)")
+else:
+    st.caption(f"Currently acting as: **{selected_persona_name}**")
+with st.container(border=True):
+    st.info("""
+    **Welcome! This is an advanced chatbot designed to answer questions about pharmaceutical and regulatory documents.** 
+    Its unique feature is the ability to tailor its information retrieval strategy based on the professional role you select in the sidebar.
+    **How to use this demo:**
+    1.  **Choose Your Mode:** Select 'Automatic' (Recommended) or a specific persona from the sidebar.
+    2.  **Ask a Question:** Use the pre-defined 'Evaluation Questions' or type your own question in the chat box below.
+    """)
+    st.markdown("<p style='text-align: center; color: grey;'>A not-for-profit demonstration project by <b>EVIL_MIT</b></p>", unsafe_allow_html=True)
 
 if st.session_state.agent is None:
     st.session_state.agent = initialize_agent()
@@ -172,8 +172,22 @@ if prompt:
 
     with st.chat_message("assistant"):
         if st.session_state.agent:
-            with st.spinner(f"Thinking as a {selected_persona_name}..."):
-                response = st.session_state.agent.run(prompt, persona=st.session_state.current_persona)
+            spinner_text = "Thinking..."
+            if st.session_state.current_persona != "automatic":
+                 spinner_text = f"Thinking as a {selected_persona_name}..."
+            
+            with st.spinner(spinner_text):
+                # --- START: Pass Chat History to Agent ---
+                # Format the last 4 messages (2 turns) for the rewriter
+                history_for_rewrite = [
+                    f"{m['role']}: {m['content']}" for m in st.session_state.messages[-5:-1]
+                ]
+                response = st.session_state.agent.run(
+                    prompt, 
+                    persona=st.session_state.current_persona,
+                    chat_history=history_for_rewrite
+                )
+                # --- END ---
                 st.markdown(response, unsafe_allow_html=True)
                 st.session_state.messages.append({"role": "assistant", "content": response})
         else:

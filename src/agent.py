@@ -1,6 +1,5 @@
 # FILE: src/agent.py
-# V2.5 (Definitive Fix): Simplifies the context formatting logic completely.
-# It now directly joins the clean, pre-formatted output from the tools.
+# V2.7: Integrated QueryRewriter for conversational memory.
 
 import logging
 import json
@@ -13,6 +12,8 @@ from src.tools.clients import get_google_ai_client
 from src.models import ToolResult, QueryMetadata, ToolPlanItem
 from src.planner.query_classifier import QueryClassifier
 from src.planner.tool_planner import ToolPlanner
+from src.planner.persona_classifier import PersonaClassifier
+from src.planner.query_rewriter import QueryRewriter # NEW IMPORT
 from src.router.tool_router import ToolRouter
 from src.fallback import should_trigger_fallback, render_fallback_message
 from src.prompts import SYNTHESIS_PROMPT
@@ -20,6 +21,7 @@ from src.prompts import SYNTHESIS_PROMPT
 logger = logging.getLogger(__name__)
 LOG_PATH = Path("trace_logs.jsonl")
 
+# ... (Timer class and log_trace function are unchanged) ...
 class Timer:
     def __enter__(self):
         self.start = time.perf_counter()
@@ -52,50 +54,63 @@ class Agent:
         self.classifier = QueryClassifier()
         self.planner = ToolPlanner(coverage_threshold=confidence_threshold)
         self.router = ToolRouter()
+        self.persona_classifier = PersonaClassifier()
+        self.rewriter = QueryRewriter() # NEW: Initialize the query rewriter
         genai_client = get_google_ai_client()
         self.llm = genai_client.GenerativeModel('gemini-1.5-pro-latest') if genai_client else None
         if not self.llm: logger.error("FATAL: Gemini client could not be initialized.")
 
-    # --- START OF DEFINITIVE FIX ---
-    # REMOVED the old _format_context_for_synthesis function entirely.
-    # --- END OF DEFINITIVE FIX ---
-
-    def run(self, query: str, persona: str) -> str:
+    def run(self, query: str, persona: str, chat_history: List[str]) -> str: # MODIFIED: Accept chat_history
         query_meta, tool_plan, results, final_answer = None, [], [], ""
         timer = Timer()
         try:
             with timer:
                 if not self.llm: return "Error: AI model not available."
-                query_meta = self.classifier.classify(query)
+                
+                # --- START: New Query Rewriting Step ---
+                rewritten_query = self.rewriter.rewrite(query, chat_history)
+                # --- END: New Step ---
+                
+                chosen_persona = persona
+                persona_display_name = " ".join(word.capitalize() for word in persona.split("_"))
+                
+                if persona == "automatic":
+                    # Use the rewritten query for classification
+                    chosen_persona = self.persona_classifier.classify(rewritten_query)
+                    persona_display_name = " ".join(word.capitalize() for word in chosen_persona.split("_"))
+                    logger.info(f"Automatic persona selected: {chosen_persona}")
+
+                # Use the rewritten query for the rest of the pipeline
+                query_meta = self.classifier.classify(rewritten_query)
                 if not query_meta: return "I'm sorry, I had trouble understanding your question."
 
-                tool_plan = self.planner.plan(query_meta, persona)
-                if not tool_plan: return "I'm sorry, I don't have a configured strategy for this persona."
+                tool_plan = self.planner.plan(query_meta, chosen_persona)
+                if not tool_plan: return f"I'm sorry, I don't have a configured strategy for a **{persona_display_name}** for this question."
 
                 for plan_item in tool_plan:
-                    results.append(self.router.execute_tool(plan_item.tool_name, query, query_meta))
+                    results.append(self.router.execute_tool(plan_item.tool_name, rewritten_query, query_meta))
 
-                if should_trigger_fallback(results): return render_fallback_message(query)
+                if should_trigger_fallback(results): return render_fallback_message(rewritten_query)
 
-                # --- START OF DEFINITIVE FIX ---
-                # This is the new, simplified context assembly logic.
-                # It filters for successful tools with real content and joins them.
-                successful_content = [
-                    res.content for res in results 
-                    if res.success and res.content and "no relevant information" not in res.content.lower()
-                ]
+                successful_content = [res.content for res in results if res.success and res.content]
                 formatted_context = "\n---\n".join(successful_content)
-                # --- END OF DEFINITIVE FIX ---
 
                 if not formatted_context:
                     return "I searched for information but could not find any relevant details."
                 
-                final_prompt = SYNTHESIS_PROMPT.format(question=query, context_str=formatted_context)
-                final_answer = self.llm.generate_content(final_prompt).text
+                final_prompt = SYNTHESIS_PROMPT.format(question=rewritten_query, context_str=formatted_context)
+                synthesis_result = self.llm.generate_content(final_prompt).text
+                
+                if persona == "automatic":
+                    final_answer = f"Acting as a **{persona_display_name}**, here is what I found:\n\n{synthesis_result}"
+                else:
+                    final_answer = synthesis_result
+
                 return final_answer
         except Exception as e:
             logger.error(f"An unexpected error occurred during agent run: {e}", exc_info=True)
             final_answer = f"I encountered a critical error. Please check the system logs."
             return final_answer
         finally:
+            # Log the original query for traceability
             log_trace(query, persona, query_meta, tool_plan, results, final_answer, timer.duration)

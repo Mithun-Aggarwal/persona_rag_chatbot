@@ -1,162 +1,14 @@
 ========================================================================
   Combined Python Files from Git Repository: /home/mit/persona_rag_chatbot
-  Generated on: Mon 28 Jul 2025 17:24:19 AEST
+  Generated on: Mon 28 Jul 2025 17:45:43 AEST
 ========================================================================
 
 
 
 ########################################################################
-### FILE: retrievers.py
+### FILE: src/__init__.py
 ########################################################################
 
-"""PineconeRetriever v2 — vector search with persona filter + optional re‑rank.
-
-Drop this in `src/retrievers/pinecone.py` and import from `ToolRouter` once you
-replace the earlier stub.  The retriever assumes text chunks are already
-embedded and stored under the configured index name.
-
-Config via ENV
--------------
-PINECONE_API_KEY       your Pinecone key (required)
-PINECONE_ENVIRONMENT   environment string (default "gcp-starter")
-PINECONE_INDEX_NAME    name of the vector index (required)
-RE_RANK                "true" to enable Cohere re‑rank (optional)
-
-Usage
------
->>> from retrievers.pinecone import PineconeRetriever
->>> retriever = PineconeRetriever()
->>> resp = retriever.search("belantamab mafodotin PBAC outcome", top_k=5, persona="clinical")
->>> print(resp[0].text, resp[0].score)
-"""
-from __future__ import annotations
-
-import os
-from dataclasses import dataclass
-from typing import List, Optional
-
-import numpy as np
-
-try:
-    import retrivers.retrievers as retrievers  # type: ignore
-except ImportError as exc:  # pragma: no cover
-    raise RuntimeError("pinecone-client not installed. `pip install pinecone-client`") from exc
-
-# Optional Cohere re-ranker
-try:
-    import cohere  # type: ignore
-except ImportError:
-    cohere = None  # type: ignore
-
-try:
-    from sentence_transformers import SentenceTransformer  # type: ignore
-except ImportError as exc:  # pragma: no cover
-    raise RuntimeError("sentence-transformers required. `pip install sentence-transformers`") from exc
-
-
-@dataclass
-class RetrievalChunk:
-    id: str
-    text: str
-    score: float
-    metadata: dict
-
-
-class PineconeRetriever:
-    """Encapsulates vector search with persona filter + (optional) re‑rank."""
-
-    def __init__(
-        self,
-        model_name: str = "all-mpnet-base-v2",
-        namespace: Optional[str] = None,
-        top_k_default: int = 10,
-    ):
-        self.namespace = namespace
-        self.top_k_default = top_k_default
-        self.re_rank_enabled = os.getenv("RE_RANK", "false").lower() == "true" and cohere is not None
-
-        # --- init Pinecone ---
-        retrievers.init(
-            api_key=os.environ["PINECONE_API_KEY"],
-            environment=os.getenv("PINECONE_ENVIRONMENT", "gcp-starter"),
-        )
-        index_name = os.environ["PINECONE_INDEX_NAME"]
-        self.index = retrievers.Index(index_name)
-
-        # --- embedder ---
-        self.embedder = SentenceTransformer(model_name)
-
-        # --- Cohere client for re‑rank (optional) ---
-        self._co = None
-        if self.re_rank_enabled:
-            self._co = cohere.Client(os.environ.get("COHERE_API_KEY"))
-
-    # ------------------------------------------------------------------
-    def search(
-        self,
-        query: str,
-        *,
-        top_k: int | None = None,
-        persona: str | None = None,
-    ) -> List[RetrievalChunk]:
-        """Return ranked list of RetrievalChunk."""
-
-        vec = self.embedder.encode(query).tolist()
-        top_k = top_k or self.top_k_default
-
-        # Build Pinecone filter
-        filter_dict = {"persona_scores." + persona: {"$gte": 0.7}} if persona else None
-
-        # Query
-        pc_res = self.index.query(
-            vector=vec,
-            top_k=top_k,
-            namespace=self.namespace,
-            include_metadata=True,
-            include_values=False,
-            filter=filter_dict,
-        )
-
-        chunks = [
-            RetrievalChunk(
-                id=match["id"],
-                text=match["metadata"].get("text", ""),
-                score=match["score"],
-                metadata=match["metadata"],
-            )
-            for match in pc_res["matches"]
-        ]
-
-        # Optional re‑rank with Cohere
-        if self.re_rank_enabled and chunks:
-            chunks = self._rerank(query, chunks)
-        return chunks
-
-    # ------------------------------------------------------------------
-    def _rerank(self, query: str, chunks: List[RetrievalChunk]) -> List[RetrievalChunk]:
-        assert self._co, "Cohere client missing"
-        docs = [c.text for c in chunks]
-        rerank_res = self._co.rerank(query=query, documents=docs)
-        # Cohere returns best‑to‑worst indices
-        new_order = [chunks[i] for i in rerank_res["reranked_indices"]]
-        # Update scores to Cohere relevance 0‑1
-        for c, score in zip(new_order, rerank_res["relevance_scores"]):
-            c.score = score
-        return new_order
-
-
-# ---------------------------------------------------------------------------
-# CLI quick test (embedding + search latency)
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    import time
-    import json
-    retriever = PineconeRetriever()
-    q = "belantamab mafodotin pbac positive recommendation"
-    t0 = time.time()
-    out = retriever.search(q, top_k=3, persona="clinical")
-    print(json.dumps([c.__dict__ for c in out], indent=2))
-    print(f"Latency: {time.time() - t0:.2f}s")
 
 
 
@@ -164,207 +16,138 @@ if __name__ == "__main__":
 ### FILE: src/agent.py
 ########################################################################
 
-# src/agent.py
-
+# FILE: src/agent.py
+# V2.1: Unified Agent with Integrated Trace Logging
 import logging
-from typing import List
-import google.generativeai as genai
-
-from src import tools, prompts, retrievers
-from src.models import ContextItem
-from src.routing.persona_router import PersonaRouter
-
-logger = logging.getLogger(__name__)
-
-class MainAgent:
-    def __init__(self, persona: str):
-        self.persona = persona
-        self.router = PersonaRouter()
-        self.llm = genai.GenerativeModel('gemini-1.5-flash-latest')
-
-    def _generate_cypher(self, query: str) -> str | None:
-        logger.info("Attempting to generate Cypher query...")
-        try:
-            # This now correctly calls the new function in tools.py
-            live_schema = tools.get_neo4j_schema()
-            if "Error:" in live_schema:
-                logger.error(f"Could not generate Cypher, failed to get schema: {live_schema}")
-                return None
-        except Exception as e:
-            logger.error(f"Could not generate Cypher, failed to get schema: {e}")
-            return None
-
-        prompt = prompts.CYPHER_GENERATION_PROMPT.format(
-            schema=live_schema,
-            question=query
-        )
-        try:
-            response = self.llm.generate_content(prompt)
-            cypher_query = response.text.strip().replace("```cypher", "").replace("```", "") # Clean up markdown
-
-            if "NONE" in cypher_query.upper() or "MATCH" not in cypher_query.upper():
-                logger.warning("LLM determined question is not suitable for graph query.")
-                return None
-
-            logger.info(f"Successfully generated Cypher: {cypher_query}")
-            return cypher_query
-        except Exception as e:
-            logger.error(f"Error during Cypher generation: {e}")
-            return None
-
-    def _format_context_with_citations(self, context: List[ContextItem]) -> str:
-        logger.info("Formatting context and creating citation markers.")
-        context_str = ""
-        source_map = {}
-        ref_counter = 1
-
-        for item in context:
-            source = item.source
-            if source.type in ["graph_path", "graph_record"]:
-                # Use a cleaner key for graph results
-                source_key = f"Graph DB Record (Query: '{source.query[:60]}...')"
-            elif source.document_id and source.page_numbers:
-                page_str = ", ".join(map(str, sorted(list(set(source.page_numbers)))))
-                source_key = f"Document: {source.document_id}, Page(s): {page_str}"
-            elif source.document_id:
-                source_key = f"Document: {source.document_id}"
-            else:
-                continue # Skip items with no identifiable source
-
-            if source_key not in source_map:
-                source_map[source_key] = f"[{ref_counter}]"
-                ref_counter += 1
-
-            citation_marker = source_map[source_key]
-
-            context_str += f"--- Context Source ---\n"
-            context_str += f"Source Citation: {citation_marker}\n"
-            context_str += f"Content: {item.content}\n\n"
-
-        # Only add reference list if there are sources
-        if source_map:
-            reference_list = "\n".join([f"{num} {key}" for key, num in source_map.items()])
-            context_str += f"\n--- Available References ---\n{reference_list}\n"
-        return context_str
-
-    def run(self, query: str) -> str:
-        logger.info(f"\U0001F7E2 Agent starting run for persona '{self.persona}' with query: '{query}'")
-
-        retrieval_plan = self.router.get_retrieval_plan(self.persona)
-        retrieved_context: List[ContextItem] = []
-
-        # Retrieve from vector stores first
-        unique_content = set()
-        for config in retrieval_plan.namespaces:
-            logger.info(f"\U0001F50D Executing vector search on namespace: {config.namespace} with top_k: {config.top_k}")
-            # This now correctly calls the function in retrievers.py
-            pinecone_results = retrievers.vector_search(query=query, namespace=config.namespace, top_k=config.top_k)
-            for res in pinecone_results:
-                if res.content not in unique_content:
-                    retrieved_context.append(res)
-                    unique_content.add(res.content)
-        
-        # Then, attempt to retrieve from graph store
-        cypher_query = self._generate_cypher(query)
-        if cypher_query:
-            logger.info(f"\U0001F578️ Executing graph search with Cypher: {cypher_query}")
-            # This now correctly calls the function in retrievers.py
-            graph_results = retrievers.graph_search(cypher_query=cypher_query)
-            retrieved_context.extend(graph_results)
-
-        if not retrieved_context:
-            logger.warning("No information found from any retriever.")
-            return "Based on the information available to me, I could not find a sufficient answer to your question."
-
-        logger.info(f"Retrieved {len(retrieved_context)} total context items. Synthesizing answer.")
-        formatted_context = self._format_context_with_citations(retrieved_context)
-        final_prompt = prompts.SYNTHESIS_PROMPT.format(question=query, context_str=formatted_context)
-
-        try:
-            final_answer = self.llm.generate_content(final_prompt).text
-        except Exception as e:
-            logger.error(f"Error during final synthesis: {e}")
-            return "I apologize, but I encountered an error while formulating a response."
-
-        logger.info("Agent run completed successfully.")
-        return final_answer
-
-
-########################################################################
-### FILE: src/agent_v2.py
-########################################################################
-
-# FILE: src/agent_v2.py (UPDATED for Phase 3.3 Exception Hardening)
-
-import logging
+import json
+import time
+from pathlib import Path
+from datetime import datetime
 from typing import List
 
-from src.models import QueryMetadata, ToolResult
+from src.tools.clients import get_google_ai_client
+from src.models import ToolResult, QueryMetadata, ToolPlanItem
 from src.planner.query_classifier import QueryClassifier
 from src.planner.tool_planner import ToolPlanner
-from src.planner.confidence import ToolConfidenceScorer
 from src.router.tool_router import ToolRouter
 from src.fallback import should_trigger_fallback, render_fallback_message
-from src.middleware.logging import log_trace, Timer
+from src.prompts import SYNTHESIS_PROMPT
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 
-class AgentV2:
-    def __init__(self, confidence_threshold: float = 0.9):
+### NEW: Logging Integration - Logic from middleware is now here ###
+LOG_PATH = Path("trace_logs.jsonl")
+
+class Timer:
+    """A context manager for timing code blocks."""
+    def __enter__(self):
+        self.start = time.perf_counter()
+        return self
+
+    def __exit__(self, *args):
+        self.end = time.perf_counter()
+        self.duration = self.end - self.start
+
+def log_trace(
+    query: str,
+    persona: str,
+    query_meta: QueryMetadata,
+    tool_plan: List[ToolPlanItem],
+    tool_results: List[ToolResult],
+    final_answer: str,
+    total_latency_sec: float
+):
+    """Writes a structured JSON line capturing the full agent loop."""
+    trace_record = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "query": query,
+        "persona": persona,
+        "intent": query_meta.intent if query_meta else "classification_failed",
+        "graph_suitable": query_meta.question_is_graph_suitable if query_meta else "unknown",
+        "tool_plan": [t.model_dump() for t in tool_plan],
+        "tool_results": [r.model_dump() for r in tool_results],
+        "final_answer_preview": final_answer[:200] + "..." if final_answer else "N/A",
+        "total_latency_sec": round(total_latency_sec, 3)
+    }
+
+    try:
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(trace_record) + "\n")
+        logger.info(f"Trace logged successfully to {LOG_PATH.resolve()}")
+    except Exception as e:
+        logger.error(f"Failed to write trace log: {e}", exc_info=True)
+### End of Logging Integration ###
+
+
+class Agent:
+    def __init__(self, confidence_threshold: float = 0.85):
         self.classifier = QueryClassifier()
         self.planner = ToolPlanner(coverage_threshold=confidence_threshold)
-        self.confidence_scorer = ToolConfidenceScorer(min_threshold=confidence_threshold)
         self.router = ToolRouter()
+        
+        genai_client = get_google_ai_client()
+        if genai_client:
+            self.llm = genai_client.GenerativeModel('gemini-1.5-pro-latest')
+        else:
+            self.llm = None
+            logger.error("FATAL: Gemini client could not be initialized. Agent synthesis will fail.")
 
-    def run(self, query: str) -> str:
-        logger.info(f"AgentV2 received query: {query}")
+    def _format_context_for_synthesis(self, results: List[ToolResult]) -> str:
+        context_str = ""
+        for res in results:
+            if res.success and res.content and "no relevant information" not in res.content.lower():
+                context_str += f"--- Evidence from Tool: {res.tool_name} ---\n"
+                context_str += f"{res.content.strip()}\n\n"
+        return context_str.strip()
 
+    def run(self, query: str, persona: str) -> str:
+        """Executes the full agent loop with integrated timing and logging."""
+        # Initialize variables for the log trace
+        query_meta, tool_plan, results, final_answer = None, [], [], ""
+        
         with Timer() as timer:
             try:
+                logger.info(f"Agent starting run for persona '{persona}' with query: '{query}'")
+
+                if not self.llm:
+                    return "Error: The AI model for synthesizing answers is not available. Please check API key configuration."
+
                 query_meta = self.classifier.classify(query)
                 if not query_meta:
-                    return "Sorry, I couldn't understand your question. Could you rephrase it?"
+                    final_answer = "I'm sorry, I had trouble understanding your question. Could you please rephrase it?"
+                    return final_answer
 
-                tool_plan = self.planner.plan(query_meta)
-                results: List[ToolResult] = []
+                tool_plan = self.planner.plan(query_meta, persona)
+                if not tool_plan:
+                    final_answer = "I'm sorry, I don't have a configured strategy to answer that question for your selected persona."
+                    return final_answer
 
+                logger.info(f"Executing tool plan: {[item.tool_name for item in tool_plan]}")
                 for plan_item in tool_plan:
-                    try:
-                        tool_result = self.router.execute_tool(
-                            plan_item.tool_name, query, query_meta
-                        )
-                    except Exception as e:
-                        logger.error(f"Tool '{plan_item.tool_name}' raised unexpected error: {e}")
-                        tool_result = ToolResult(
-                            tool_name=plan_item.tool_name,
-                            success=False,
-                            content=f"Tool error: {str(e)}",
-                            estimated_coverage=0.0
-                        )
-
-                    tool_result.estimated_coverage = plan_item.estimated_coverage
-                    results.append(tool_result)
-
-                    if self.confidence_scorer.has_sufficient_coverage(results):
-                        logger.info("Coverage threshold met. Stopping early.")
-                        break
+                    results.append(self.router.execute_tool(plan_item.tool_name, query, query_meta))
 
                 if should_trigger_fallback(results):
-                    return render_fallback_message(query)
+                    final_answer = render_fallback_message(query)
+                    return final_answer
 
-                response = self._synthesize_answer([r for r in results if r.success])
-                return response
+                formatted_context = self._format_context_for_synthesis(results)
+                if not formatted_context:
+                    final_answer = "I was able to search for information but could not find any relevant details to answer your question."
+                    return final_answer
+                
+                final_prompt = SYNTHESIS_PROMPT.format(question=query, context_str=formatted_context)
+                final_answer = self.llm.generate_content(final_prompt).text
+                logger.info("Agent run completed successfully.")
+                return final_answer
+
+            except Exception as e:
+                logger.error(f"An unexpected error occurred during agent run: {e}", exc_info=True)
+                final_answer = f"I encountered a critical error: {e}. Please check the system logs."
+                return final_answer
 
             finally:
-                if 'query_meta' in locals():
-                    log_trace(query, query_meta, tool_plan, results, timer.duration)
-
-    def _synthesize_answer(self, results: List[ToolResult]) -> str:
-        chunks = [f"[{r.tool_name.upper()}] {r.content}" for r in results if r.content]
-        return "\n---\n".join(chunks)
-
-# Note: all tool errors are now caught per-call, never propagate uncaught exceptions.
+                # This block ensures that a trace is logged regardless of success or failure.
+                log_trace(query, persona, query_meta, tool_plan, results, final_answer, timer.duration)
 
 
 ########################################################################
@@ -388,37 +171,6 @@ def get_project_root() -> Path:
     """
     # We assume this file is in 'src/'. The project root is one level up.
     return Path(__file__).parent.parent.resolve()
-
-
-########################################################################
-### FILE: src/config_loader.py
-########################################################################
-
-# src/config_loader.py
-
-import os
-from dotenv import load_dotenv
-
-# Load environment variables from a .env file if it exists
-load_dotenv()
-
-def get_env(variable_name: str, default: str = None) -> str:
-    """Gets an environment variable or returns a default."""
-    value = os.getenv(variable_name)
-    if value is None and default is None:
-        raise ValueError(f"Required environment variable '{variable_name}' is not set.")
-    return value if value is not None else default
-
-# --- API Keys and Environment ---
-GOOGLE_API_KEY = get_env("GOOGLE_API_KEY")
-PINECONE_API_KEY = get_env("PINECONE_API_KEY")
-PINECONE_INDEX_NAME = get_env("PINECONE_INDEX_NAME", "pbac")
-
-# --- Neo4j Database Credentials ---
-NEO4J_URI = get_env("NEO4J_URI")
-NEO4J_USERNAME = get_env("NEO4J_USERNAME", "neo4j")
-NEO4J_PASSWORD = get_env("NEO4J_PASSWORD")
-NEO4J_DATABASE = get_env("NEO4J_DATABASE", "neo4j")
 
 
 ########################################################################
@@ -596,6 +348,13 @@ class RetrievalPlan(BaseModel):
 
 
 ########################################################################
+### FILE: src/planner/__init__.py
+########################################################################
+
+
+
+
+########################################################################
 ### FILE: src/planner/confidence.py
 ########################################################################
 
@@ -695,73 +454,119 @@ if __name__ == "__main__":
 ########################################################################
 
 # FILE: src/planner/tool_planner.py
-# Phase 1.2: ToolPlanner — scores available tools based on query intent and persona coverage
-
+# V2.0: Persona-Aware Tool Planner
 import logging
-from typing import List, Tuple
+import yaml
+from pathlib import Path
+from typing import List, Dict
+
 from src.models import QueryMetadata, ToolPlanItem
 
 logger = logging.getLogger(__name__)
 
-# Hardcoded example scoring logic for Phase 1.2
-# Format: (intent, tool_name) -> base score
+# Base scores for tools based on query intent. A higher score is better.
+# These tool names MUST match the names in `persona_tool_map.yml` and the tool router.
 INTENT_TOOL_SCORES = {
-    ("specific_fact_lookup", "neo4j"): 0.9,
-    ("specific_fact_lookup", "pinecone"): 0.6,
-    ("simple_summary", "pinecone"): 0.85,
-    ("simple_summary", "neo4j"): 0.4,
-    ("comparative_analysis", "pinecone"): 0.8,
-    ("comparative_analysis", "neo4j"): 0.6,
-    ("general_qa", "pinecone"): 0.7,
-    ("general_qa", "neo4j"): 0.5
+    # If the user wants a specific fact...
+    "specific_fact_lookup": {
+        "query_knowledge_graph": 0.9,
+        "retrieve_clinical_data": 0.7,
+        "retrieve_general_text": 0.6,
+        "retrieve_summary_data": 0.4,
+    },
+    # If the user wants a high-level summary...
+    "simple_summary": {
+        "retrieve_summary_data": 0.9,
+        "retrieve_general_text": 0.8,
+        "retrieve_clinical_data": 0.5,
+        "query_knowledge_graph": 0.4,
+    },
+    # If the user wants to compare things...
+    "comparative_analysis": {
+        "retrieve_clinical_data": 0.8,
+        "retrieve_summary_data": 0.8,
+        "retrieve_general_text": 0.7,
+        "query_knowledge_graph": 0.5,
+    },
+    # For general questions...
+    "general_qa": {
+        "retrieve_general_text": 0.9,
+        "retrieve_summary_data": 0.7,
+        "query_knowledge_graph": 0.6,
+        "retrieve_clinical_data": 0.5,
+    },
 }
-
-DEFAULT_SCORE = 0.3
+DEFAULT_INTENT_SCORE = 0.5
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 class ToolPlanner:
     def __init__(self, coverage_threshold: float = 0.9):
         self.coverage_threshold = coverage_threshold
+        self._load_persona_map()
 
-    def plan(self, query_meta: QueryMetadata) -> List[ToolPlanItem]:
-        """Returns a ranked list of ToolPlanItems until coverage ≥ threshold."""
-        logger.info(f"Planning tools for intent: {query_meta.intent}")
-        ordered_tools: List[ToolPlanItem] = []
-        tools = ["neo4j", "pinecone"]
+    def _load_persona_map(self):
+        """Loads the persona-to-tool mapping from the central YAML config."""
+        map_file = PROJECT_ROOT / "config" / "persona_tool_map.yml"
+        try:
+            with open(map_file, 'r') as f:
+                self.persona_map = yaml.safe_load(f)
+            logger.info(f"Successfully loaded persona-tool map from '{map_file}'.")
+        except Exception as e:
+            logger.error(f"FATAL: Could not load or parse persona-tool map from '{map_file}': {e}", exc_info=True)
+            self.persona_map = {}
 
-        # Assign intent-based score (later refine with persona-aware logic)
-        tool_scores: List[Tuple[str, float]] = []
-        for tool in tools:
-            score = INTENT_TOOL_SCORES.get((query_meta.intent, tool), DEFAULT_SCORE)
-            tool_scores.append((tool, score))
+    def plan(self, query_meta: QueryMetadata, persona: str) -> List[ToolPlanItem]:
+        """
+        Creates a ranked tool plan by combining query intent with user persona preferences.
+        """
+        logger.info(f"Planning tools for intent '{query_meta.intent}' and persona '{persona}'")
+        
+        # 1. Get the list of preferred tools and their weights for the given persona
+        persona_key = persona.lower().replace(" ", "_")
+        persona_prefs = self.persona_map.get(persona_key, self.persona_map.get("default", []))
 
-        # Sort by descending score
-        tool_scores.sort(key=lambda x: x[1], reverse=True)
+        if not persona_prefs:
+            logger.warning(f"No tool preferences found for persona '{persona_key}' or default. Returning empty plan.")
+            return []
+            
+        persona_tool_weights: Dict[str, float] = {p["tool_name"]: p["weight"] for p in persona_prefs}
+        
+        # 2. Get intent-based scores for tools relevant to the current query intent
+        intent_scores = INTENT_TOOL_SCORES.get(query_meta.intent, {})
 
+        # 3. Calculate a final score for each tool by multiplying persona weight and intent score
+        scored_tools = []
+        for tool_name, persona_weight in persona_tool_weights.items():
+            intent_score = intent_scores.get(tool_name, DEFAULT_INTENT_SCORE)
+            
+            # The final score reflects both the persona's general preference and the tool's suitability for the task
+            final_score = persona_weight * intent_score
+            scored_tools.append({"name": tool_name, "score": final_score})
+
+        # 4. Sort tools by their final score in descending order
+        scored_tools.sort(key=lambda x: x["score"], reverse=True)
+
+        # 5. Build the final plan, adding tools until the cumulative coverage threshold is met
+        final_plan: List[ToolPlanItem] = []
         total_coverage = 0.0
-        for tool, score in tool_scores:
+        for tool in scored_tools:
+            # We treat the score as the estimated coverage for this planning step
+            estimated_coverage = round(tool["score"], 2)
+
+            # Do not add tools with negligible contribution
+            if estimated_coverage <= 0.1:
+                continue
+
+            plan_item = ToolPlanItem(tool_name=tool["name"], estimated_coverage=estimated_coverage)
+            final_plan.append(plan_item)
+            
+            total_coverage += estimated_coverage
             if total_coverage >= self.coverage_threshold:
+                logger.info(f"Coverage threshold of {self.coverage_threshold} met. Finalizing plan.")
                 break
-            ordered_tools.append(ToolPlanItem(tool_name=tool, estimated_coverage=score))
-            total_coverage += score
-
-        logger.info(f"Tool plan result: {[t.model_dump() for t in ordered_tools]}")
-        return ordered_tools
-
-# Optional test block
-if __name__ == "__main__":
-    from src.models import QueryMetadata
-
-    mock_meta = QueryMetadata(
-        intent="specific_fact_lookup",
-        keywords=["Abaloparatide", "sponsor"],
-        question_is_graph_suitable=True
-    )
-
-    planner = ToolPlanner()
-    plan = planner.plan(mock_meta)
-    for item in plan:
-        print(item.model_dump_json(indent=2))
-
+        
+        logger.info(f"Generated tool plan: {[t.model_dump_json(indent=2) for t in final_plan]}")
+        return final_plan
 
 
 ########################################################################
@@ -820,380 +625,9 @@ You are an AI assistant, an 'Inter-Expert Interpreter'. Your role is to deliver 
 
 
 ########################################################################
-### FILE: src/retrievers.py
+### FILE: src/router/__init__.py
 ########################################################################
 
-# src/retrievers.py
-
-"""
-Modular data retrieval functions ("retrievers").
-
-Each function here is responsible for fetching data from a single source
-(e.g., Pinecone, Neo4j) and returning it in a standardized format.
-This module imports low-level clients from `src.tools`.
-"""
-import logging
-from typing import List, Dict, Any
-
-import neo4j
-import google.generativeai as genai
-
-from src import tools  # Correct: Import the module itself
-from src.models import ContextItem, Source
-
-logger = logging.getLogger(__name__)
-
-
-def vector_search(query: str, namespace: str, top_k: int) -> List[ContextItem]:
-    """Performs semantic search on a Pinecone namespace and returns standardized context."""
-    embedding_client = tools.get_google_ai_client()
-    pinecone_index = tools.get_pinecone_index()
-
-    if not all([embedding_client, pinecone_index]):
-        logger.error("Vector search failed: Pinecone or Google AI client not available.")
-        return []
-
-    try:
-        query_embedding_result = genai.embed_content(
-            model='models/embedding-001',
-            content=query,
-            task_type="retrieval_query"
-        )
-        query_embedding = query_embedding_result['embedding']
-
-        results = pinecone_index.query(
-            namespace=namespace,
-            vector=query_embedding,
-            top_k=top_k,
-            include_metadata=True
-        )
-
-        processed_results = []
-        for match in results.get('matches', []):
-            metadata = match.get('metadata', {})
-            content = metadata.get('source_text_preview') or metadata.get('text', 'No content available.')
-
-            page_numbers_raw = metadata.get("page_numbers")
-            if isinstance(page_numbers_raw, str):
-                try:
-                    page_numbers = eval(page_numbers_raw)
-                except:
-                    page_numbers = []
-            elif isinstance(page_numbers_raw, list):
-                page_numbers = page_numbers_raw
-            else:
-                page_numbers = []
-
-            source = Source(
-                document_id=metadata.get("doc_id"),
-                page_numbers=page_numbers,
-                source_url=metadata.get("source_pdf_url"),
-                retrieval_score=match.get('score', 0.0),
-                type="vector_chunk"
-            )
-            processed_results.append(ContextItem(content=content, source=source))
-
-        logger.info(f"Vector search in '{namespace}' with top_k={top_k} found {len(processed_results)} results.")
-        return processed_results
-
-    except Exception as e:
-        logger.error(f"An error occurred during vector search in namespace '{namespace}': {e}")
-        return []
-
-
-# --- THIS IS THE CRITICAL FIX ---
-# The helper function is defined LOCALLY within this file.
-# It is NOT imported from src.tools.
-def _serialize_path(path: neo4j.graph.Path) -> (str, Dict[str, Any]):
-    """Helper to convert a Neo4j Path into a text representation and source dict."""
-    nodes_str = []
-    all_pages = set()
-    all_docs = set()
-
-    for i, node in enumerate(path.nodes):
-        node_label = next(iter(node.labels), "Node")
-        name = node.get('name', node.get('id', 'Unknown'))
-        nodes_str.append(f"({name}:{node_label})")
-        if i < len(path.relationships):
-            rel = path.relationships[i]
-            nodes_str.append(f"-[{rel.type}]->")
-
-            doc_id = rel.get("doc_id")
-            page_num = rel.get("page_number")
-            if doc_id:
-                all_docs.add(doc_id)
-            if page_num:
-                all_pages.add(str(page_num))
-
-    path_repr = "".join(nodes_str)
-    
-    source_info = {
-        "type": "graph_path",
-        "document_id": ", ".join(sorted(list(all_docs))) if all_docs else "N/A",
-        "page_numbers": sorted(list(all_pages))
-    }
-    return path_repr, source_info
-
-
-def graph_search(cypher_query: str) -> List[ContextItem]:
-    """Executes a Cypher query and returns standardized context."""
-    driver = tools.get_neo4j_driver() # This import is correct.
-    if not driver:
-        logger.error("Graph search failed: Neo4j driver not available.")
-        return []
-
-    results = []
-    try:
-        with driver.session() as session:
-            records, _, _ = session.execute_query(cypher_query)
-
-            for record in records:
-                path = record.get("p")
-                if path and isinstance(path, neo4j.graph.Path):
-                    # It now calls the LOCAL _serialize_path function.
-                    content_str, source_info = _serialize_path(path)
-                    source_info['query'] = cypher_query
-                    source = Source(**source_info)
-                    results.append(ContextItem(content=content_str, source=source))
-                else:
-                    content_str = str(record.data())
-                    source = Source(type="graph_record", query=cypher_query)
-                    results.append(ContextItem(content=content_str, source=source))
-
-            logger.info(f"Graph search with Cypher query returned {len(results)} results.")
-            return results
-    except Exception as e:
-        logger.error(f"An error occurred during graph search: {e}")
-        return [ContextItem(
-            content=f"Failed to execute Cypher query due to an error: {e}",
-            source=Source(type="error", query=cypher_query)
-        )]
-
-
-########################################################################
-### FILE: src/retrievers/__init__.py
-########################################################################
-
-# FILE: src/retrievers/__init__.py
-
-from .pinecone import vector_search
-from .neo4j_graph import graph_search
-from .pdf_live import run_pdf_retriever
-
-__all__ = ["vector_search", "graph_search", "run_pdf_retriever"]
-
-
-
-########################################################################
-### FILE: src/retrievers/neo4j_graph.py
-########################################################################
-
-# FILE: src/retrievers/neo4j_graph.py
-# Phase 2.3: Neo4jGraphAgent — safe Cypher runner with relationship path output
-
-import logging
-from typing import List
-from neo4j import GraphDatabase, exceptions
-
-from src.models import ToolResult, QueryMetadata
-from src.tools import get_neo4j_driver, serialize_neo4j_path
-
-logger = logging.getLogger(__name__)
-
-
-def run_neo4j_search(query: str, query_meta: QueryMetadata) -> ToolResult:
-    """
-    Executes Cypher query safely. First dry-runs with RETURN 1 to validate.
-    If valid, executes and serializes relationship paths.
-    """
-    driver = get_neo4j_driver()
-    if not driver:
-        return ToolResult(tool_name="neo4j", success=False, content="Neo4j driver not available.")
-
-    cypher = generate_cypher(query, query_meta)
-    if not cypher:
-        return ToolResult(tool_name="neo4j", success=False, content="Query not graph-suitable or no Cypher generated.")
-
-    if not _is_valid_cypher(driver, cypher):
-        return ToolResult(tool_name="neo4j", success=False, content="Generated Cypher query failed validation.")
-
-    try:
-        with driver.session() as session:
-            records = session.run(cypher)
-            paths = []
-
-            for rec in records:
-                p = rec.get("p")
-                if p:
-                    paths.append(serialize_neo4j_path(p))
-                else:
-                    paths.append(str(rec))
-
-            if not paths:
-                return ToolResult(tool_name="neo4j", success=False, content="No matching graph paths found.")
-
-            return ToolResult(tool_name="neo4j", success=True, content="\n---\n".join(paths))
-    except Exception as e:
-        logger.error(f"Neo4j query failed: {e}", exc_info=True)
-        return ToolResult(tool_name="neo4j", success=False, content=f"Error during execution: {e}")
-
-
-def generate_cypher(query: str, query_meta: QueryMetadata) -> str:
-    """Placeholder Cypher generation. Later replaced with LLM-based logic."""
-    if not query_meta.question_is_graph_suitable:
-        return ""
-    return f"MATCH p=(d:Drug)-[r]->(x) WHERE d.name CONTAINS '{query_meta.keywords[0]}' RETURN p LIMIT 5"
-
-
-def _is_valid_cypher(driver, cypher: str) -> bool:
-    try:
-        with driver.session() as session:
-            test_query = f"CALL {{ {cypher} }} RETURN 1"
-            session.run(test_query)
-            return True
-    except exceptions.CypherSyntaxError as e:
-        logger.warning(f"Dry-run validation failed: {e}")
-        return False
-
-
-
-########################################################################
-### FILE: src/retrievers/pdf_live.py
-########################################################################
-
-# FILE: src/retrievers/pdf_live.py
-# Phase 2.4: PDFLiveRetriever — stream, extract, and embed up to 3 PDFs or 100 pages total
-
-import logging
-import tempfile
-import requests
-from typing import List
-
-from src.models import ToolResult, QueryMetadata
-from src.tools import extract_pdf_text, get_google_ai_client, get_pinecone_index, stream_pdf_metadata
-
-logger = logging.getLogger(__name__)
-
-MAX_PDFS = 3
-MAX_TOTAL_PAGES = 100
-
-
-def run_pdf_retriever(query: str, query_meta: QueryMetadata) -> ToolResult:
-    """
-    Loads and processes up to 3 PDFs (or 100 pages total) from public URLs.
-    Uses Google Embed API to get semantic representation and return top chunks.
-    """
-    try:
-        pdf_links = stream_pdf_metadata(query_meta.keywords, max_docs=MAX_PDFS)
-        if not pdf_links:
-            return ToolResult(tool_name="pdf", success=False, content="No public PDFs matched keywords.")
-
-        embedding_client = get_google_ai_client()
-        pinecone_index = get_pinecone_index()
-        query_embedding = embedding_client.embed_content(query=query, model="models/embedding-001", task_type="retrieval_query")["embedding"]
-
-        total_pages, all_chunks = 0, []
-        for url in pdf_links:
-            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp:
-                r = requests.get(url, timeout=20)
-                tmp.write(r.content)
-                tmp.flush()
-
-                chunks = extract_pdf_text(tmp.name)
-                if not chunks: continue
-
-                all_chunks.extend(chunks)
-                total_pages += len(chunks)
-                if total_pages >= MAX_TOTAL_PAGES:
-                    break
-
-        if not all_chunks:
-            return ToolResult(tool_name="pdf", success=False, content="Could not extract any text from public PDFs.")
-
-        # Embed all chunks and score against query
-        embedded_chunks = embedding_client.embed_contents(
-            model="models/embedding-001",
-            contents=[c["text"] for c in all_chunks],
-            task_type="retrieval_document"
-        )["embeddings"]
-
-        scored = [
-            (chunk, _cosine_similarity(e, query_embedding))
-            for chunk, e in zip(all_chunks, embedded_chunks)
-        ]
-        top_matches = sorted(scored, key=lambda x: -x[1])[:5]
-
-        snippet = "\n---\n".join(f"• {c['text'][:500]}..." for c, _ in top_matches)
-        return ToolResult(tool_name="pdf", success=True, content=snippet)
-
-    except Exception as e:
-        logger.error(f"PDFLiveRetriever failed: {e}", exc_info=True)
-        return ToolResult(tool_name="pdf", success=False, content=f"Error: {e}")
-
-
-def _cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
-    dot = sum(a * b for a, b in zip(vec1, vec2))
-    norm1 = sum(a * a for a in vec1) ** 0.5
-    norm2 = sum(b * b for b in vec2) ** 0.5
-    return dot / (norm1 * norm2 + 1e-8)
-
-
-########################################################################
-### FILE: src/retrievers/pinecone.py
-########################################################################
-
-# FILE: src/retrievers/pinecone.py
-
-import logging
-from typing import List
-from sentence_transformers import SentenceTransformer
-from src.models import ContextItem
-import pinecone
-import os
-
-logger = logging.getLogger(__name__)
-
-# Initialize Pinecone only once
-def _init_pinecone():
-    pinecone_api_key = os.getenv("PINECONE_API_KEY")
-    pinecone_env = os.getenv("PINECONE_ENVIRONMENT")
-    if not pinecone_api_key or not pinecone_env:
-        raise RuntimeError("Pinecone environment not configured.")
-    pinecone.init(api_key=pinecone_api_key, environment=pinecone_env)
-
-# Main vector search function
-def vector_search(query: str, namespace: str, top_k: int = 10) -> List[ContextItem]:
-    from src.models import Source  # Local import to avoid circular dependency
-
-    _init_pinecone()
-    index_name = os.getenv("PINECONE_INDEX_NAME")
-    if not index_name:
-        raise RuntimeError("PINECONE_INDEX_NAME not set in environment.")
-
-    index = pinecone.Index(index_name)
-
-    logger.info(f"🔎 Performing vector search on Pinecone index '{index_name}' in namespace '{namespace}'")
-
-    model = SentenceTransformer("all-mpnet-base-v2")
-    query_vector = model.encode(query).tolist()
-
-    response = index.query(vector=query_vector, namespace=namespace, top_k=top_k, include_metadata=True)
-    results = []
-    for match in response.matches:
-        metadata = match.metadata
-        results.append(ContextItem(
-            content=metadata.get("text", ""),
-            score=match.score,
-            source=Source(
-                type="pinecone",
-                document_id=metadata.get("doc_id"),
-                page_numbers=[metadata.get("page")],
-                chunk_id=metadata.get("chunk_id"),
-                public_url=metadata.get("public_url")
-            )
-        ))
-
-    return results
 
 
 
@@ -1285,74 +719,96 @@ class PersonaRouter:
 ########################################################################
 
 # FILE: src/router/tool_router.py
-# Phase 2.1: ToolRouter — modular dispatcher that executes tools with unified interface
-
+# V2.0: Modular dispatcher for the unified agent.
+"""
+Maps tool names from the planner to callable functions from the tool library.
+This module replaces hardcoded routing with a pluggable, extensible registry.
+"""
 import logging
 from typing import Callable, Dict
 
 from src.models import QueryMetadata, ToolResult
-from src.retrievers.pinecone import run_pinecone_search
-from src.retrievers.neo4j_graph import run_neo4j_search
+from src.tools import retrievers # Import the entire retrievers module
 
 logger = logging.getLogger(__name__)
 
 class ToolRouter:
     """
-    Maps tool names to callable functions.
-    This module replaces hardcoded routing with pluggable, extensible logic.
+    Executes a specific tool by name, providing a unified and safe interface.
     """
-
     def __init__(self):
+        """
+        Initializes the router by creating a registry of all available tools.
+        The keys MUST match the 'tool_name' in `persona_tool_map.yml` and the planner logic.
+        """
         self.registry: Dict[str, Callable[[str, QueryMetadata], ToolResult]] = {
-            "pinecone": run_pinecone_search,
-            "neo4j": run_neo4j_search,
-            # Future: "pdf": run_pdf_retriever,
+            # Vector Search Tools
+            "retrieve_clinical_data": retrievers.retrieve_clinical_data,
+            "retrieve_summary_data": retrievers.retrieve_summary_data,
+            "retrieve_general_text": retrievers.retrieve_general_text,
+            
+            # Graph Search Tool
+            "query_knowledge_graph": retrievers.query_knowledge_graph,
+            
+            # Future tools can be added here easily:
+            # "search_live_web": tools.search_live_web,
         }
+        logger.info(f"ToolRouter initialized with {len(self.registry)} tools: {list(self.registry.keys())}")
 
     def execute_tool(self, tool_name: str, query: str, query_meta: QueryMetadata) -> ToolResult:
-        logger.info(f"[ToolRouter] Executing: {tool_name}")
-        fn = self.registry.get(tool_name)
+        """
+        Looks up a tool by name in the registry and executes it.
 
-        if not fn:
-            logger.warning(f"[ToolRouter] Tool '{tool_name}' not found. Returning fallback result.")
-            return ToolResult(tool_name=tool_name, success=False, content="[Tool not implemented]", estimated_coverage=0.0)
+        Args:
+            tool_name: The name of the tool to execute.
+            query: The original user query.
+            query_meta: The structured metadata about the query.
+
+        Returns:
+            A ToolResult object with the outcome of the execution.
+        """
+        logger.info(f"[ToolRouter] Attempting to execute tool: '{tool_name}'")
+        
+        tool_function = self.registry.get(tool_name)
+
+        if not tool_function:
+            logger.warning(f"[ToolRouter] Tool '{tool_name}' not found in registry. Returning a failure result.")
+            return ToolResult(
+                tool_name=tool_name, 
+                success=False, 
+                content="[Error: Tool not implemented or misconfigured]"
+            )
 
         try:
-            return fn(query, query_meta)
+            # Call the registered function with the required arguments
+            return tool_function(query, query_meta)
         except Exception as e:
-            logger.error(f"[ToolRouter] Tool '{tool_name}' failed: {e}", exc_info=True)
-            return ToolResult(tool_name=tool_name, success=False, content=f"Tool error: {e}", estimated_coverage=0.0)
+            # This is a critical safety net. If a tool fails unexpectedly,
+            # it won't crash the entire agent.
+            logger.error(f"[ToolRouter] Tool '{tool_name}' failed with an unhandled exception: {e}", exc_info=True)
+            return ToolResult(
+                tool_name=tool_name, 
+                success=False, 
+                content=f"An unexpected error occurred in the tool: {e}"
+            )
 
 
-# Optional test block
-if __name__ == "__main__":
-    from src.models import QueryMetadata
+########################################################################
+### FILE: src/tools/__init__.py
+########################################################################
 
-    meta = QueryMetadata(
-        intent="specific_fact_lookup",
-        keywords=["Abaloparatide"],
-        question_is_graph_suitable=True
-    )
-
-    router = ToolRouter()
-    result = router.execute_tool("neo4j", "What company sponsors Abaloparatide?", meta)
-    print(result.model_dump_json(indent=2))
 
 
 
 ########################################################################
-### FILE: src/tools.py
+### FILE: src/tools/client.py
 ########################################################################
 
-# src/tools.py
-
+# FILE: src/tools/clients.py
+# V2.0: Consolidated, cached client initializers.
 """
-Low-level tools and client initializers.
-
-This module is responsible for setting up and providing access to external
-services like databases and APIs (Pinecone, Neo4j, Google AI). It reads
-credentials from environment variables. It has NO dependencies on other
-modules in this project to prevent circular imports.
+Single source for initializing and retrieving external service clients.
+Uses caching to prevent re-initialization on every call.
 """
 
 import os
@@ -1362,7 +818,9 @@ from functools import lru_cache
 import pinecone
 import neo4j
 import google.generativeai as genai
+from dotenv import load_dotenv
 
+load_dotenv()
 logger = logging.getLogger(__name__)
 
 # --- Client Initializers (Cached for Performance) ---
@@ -1389,7 +847,8 @@ def get_pinecone_index() -> pinecone.Index:
         index_name = os.getenv("PINECONE_INDEX_NAME")
         if not api_key or not index_name:
             raise ValueError("PINECONE_API_KEY or PINECONE_INDEX_NAME not set.")
-
+        
+        # Updated initialization for latest pinecone-client versions
         pc = pinecone.Pinecone(api_key=api_key)
         index = pc.Index(index_name)
         logger.info(f"Pinecone index '{index_name}' connected successfully.")
@@ -1399,11 +858,11 @@ def get_pinecone_index() -> pinecone.Index:
         return None
 
 @lru_cache(maxsize=1)
-def get_neo4j_driver() -> neo4j.GraphDatabase.driver:
+def get_neo4j_driver() -> neo4j.Driver:
     """Initializes and returns the Neo4j driver."""
     try:
         uri = os.getenv("NEO4J_URI")
-        user = os.getenv("NEO4J_USERNAME")
+        user = os.getenv("NEO4J_USERNAME", "neo4j")
         password = os.getenv("NEO4J_PASSWORD")
         if not all([uri, user, password]):
             raise ValueError("Neo4j connection details (URI, USERNAME, PASSWORD) not set.")
@@ -1416,195 +875,235 @@ def get_neo4j_driver() -> neo4j.GraphDatabase.driver:
         logger.error(f"Failed to create Neo4j driver: {e}")
         return None
 
-# --- Graph Schema Utility ---
-
-@lru_cache(maxsize=1)
-def get_neo4j_schema() -> str:
-    """
-    Retrieves the schema from Neo4j for use in LLM prompts.
-    This includes node labels, properties, and relationship types.
-    """
-    driver = get_neo4j_driver()
-    if not driver:
-        return "Error: Neo4j driver not available."
-
-    schema_query = """
-    CALL db.schema.visualization()
-    """
-    try:
-        with driver.session() as session:
-            result = session.run(schema_query)
-            # The result from schema visualization is complex; we need to simplify it.
-            # A simpler approach for LLM prompts is often a text-based description.
-            
-            # Get node labels and properties
-            node_schema_query = "CALL db.labels() YIELD label CALL db.propertyKeys() YIELD propertyKey WITH label, collect(propertyKey) AS properties RETURN label, properties"
-            node_props = session.run(node_schema_query).data()
-            
-            # Get relationship schema
-            rel_schema_query = """
-            MATCH (n)-[r]->(m)
-            RETURN DISTINCT type(r) AS rel_type, labels(n) AS from_labels, labels(m) AS to_labels
-            LIMIT 50
-            """
-            rel_types = session.run(rel_schema_query).data()
-
-            schema_str = "Graph Schema:\n"
-            schema_str += "Node Labels and Properties:\n"
-            for item in node_props:
-                 # Check if the node label exists and has properties
-                if item['label'] and item['properties']:
-                    # This is a simplification; a more robust version would check properties per label
-                    # For now, we list all possible properties under each label for prompt context
-                    # A better query: "MATCH (n:{label}) UNWIND keys(n) as key RETURN distinct key"
-                    schema_str += f"- Node '{item['label']}'\n"
-            
-            schema_str += "\nRelationship Types and Connections:\n"
-            for item in rel_types:
-                from_node = item['from_labels'][0] if item['from_labels'] else "Node"
-                to_node = item['to_labels'][0] if item['to_labels'] else "Node"
-                schema_str += f"- ({from_node})-[:{item['rel_type']}]->({to_node})\n"
-
-            if not node_props and not rel_types:
-                return "Schema not found or database is empty."
-
-            return schema_str
-
-    except Exception as e:
-        logger.error(f"Failed to retrieve Neo4j schema: {e}")
-        return f"Error retrieving schema: {e}"
-
 
 ########################################################################
-### FILE: src/tools/client.py
+### FILE: src/tools/retrievers.py
 ########################################################################
 
-# src/tools/clients.py
+# FILE: src/tools/retrievers.py
+# V2.0: Centralized, tool-based retrieval functions.
+"""
+This module contains the actual "tools" the agent can execute.
+Each function corresponds to a tool name, fetches data from a source,
+and returns a standardized ToolResult.
+"""
 
-import os
 import logging
-import pinecone
-import google.generativeai as genai
-from neo4j import GraphDatabase, Driver
+from typing import List
 
-from src import config_loader
+import neo4j
+
+from src.tools.clients import get_google_ai_client, get_pinecone_index, get_neo4j_driver
+from src.models import ToolResult, QueryMetadata
+from src.prompts import CYPHER_GENERATION_PROMPT
 
 logger = logging.getLogger(__name__)
 
-# --- Singleton instances to avoid re-initializing ---
-_google_ai_client = None
-_pinecone_index = None
-_neo4j_driver = None
+# --- Helper Functions ---
 
-def get_google_ai_client():
-    """Initializes and returns the Google Generative AI client."""
-    global _google_ai_client
-    if _google_ai_client is None:
-        try:
-            genai.configure(api_key=config_loader.GOOGLE_API_KEY)
-            _google_ai_client = genai
-            logger.info("Successfully initialized Google AI client.")
-        except Exception as e:
-            logger.error(f"Failed to initialize Google AI client: {e}")
-            raise
-    return _google_ai_client
+def _format_pinecone_results(matches: List[dict]) -> List[str]:
+    """Standardizes Pinecone matches into a list of content strings with clear citations."""
+    contents = []
+    for match in matches:
+        metadata = match.get('metadata', {})
+        text = metadata.get('text', 'No content available.')
+        doc_id = metadata.get('doc_id', 'Unknown Document')
+        page_num = metadata.get('page_number') or metadata.get('page', 'N/A')
+        score = match.get('score', 0.0)
+        
+        # Format a clean citation string for the LLM to use
+        citation = f"[Source: {doc_id}, Page: {page_num}, Similarity: {score:.2f}]"
+        contents.append(f"{text}\n{citation}")
+        
+    return contents
 
-def get_pinecone_index():
-    """Initializes and returns the Pinecone index handle."""
-    global _pinecone_index
-    if _pinecone_index is None:
-        try:
-            pc = pinecone.Pinecone(api_key=config_loader.PINECONE_API_KEY)
-            index_name = config_loader.PINECONE_INDEX_NAME
-            _pinecone_index = pc.Index(index_name)
-            logger.info(f"Successfully connected to Pinecone index '{index_name}'.")
-        except Exception as e:
-            logger.error(f"Failed to initialize Pinecone index: {e}")
-            raise
-    return _pinecone_index
+def _serialize_neo4j_path(path: neo4j.graph.Path) -> str:
+    """Helper to convert a Neo4j Path into a readable text representation."""
+    nodes_str = []
+    for i, node in enumerate(path.nodes):
+        node_label = next(iter(node.labels), "Node")
+        name = node.get('name', node.get('id', 'Unknown'))
+        nodes_str.append(f"({name}:{node_label})")
+        if i < len(path.relationships):
+            rel = path.relationships[i]
+            nodes_str.append(f"-[{rel.type}]->")
+    return "".join(nodes_str)
 
-def get_neo4j_driver() -> Driver:
-    """Initializes and returns the Neo4j driver."""
-    global _neo4j_driver
-    if _neo4j_driver is None:
-        try:
-            _neo4j_driver = GraphDatabase.driver(
-                config_loader.NEO4J_URI,
-                auth=(config_loader.NEO4J_USERNAME, config_loader.NEO4J_PASSWORD)
-            )
-            _neo4j_driver.verify_connectivity()
-            logger.info("Successfully connected to Neo4j database.")
-        except Exception as e:
-            logger.error(f"Failed to initialize Neo4j driver: {e}")
-            raise
-    return _neo4j_driver
+# --- Vector Search Tools ---
 
-def close_neo4j_driver():
-    """Closes the Neo4j driver connection if it exists."""
-    global _neo4j_driver
-    if _neo4j_driver:
-        _neo4j_driver.close()
-        _neo4j_driver = None
-        logger.info("Neo4j driver closed.")
+def _vector_search_tool(query: str, namespace: str, tool_name: str, top_k: int = 7) -> ToolResult:
+    """Generic, reusable vector search tool for a specific Pinecone namespace."""
+    pinecone_index = get_pinecone_index()
+    embedding_client = get_google_ai_client()
+    if not pinecone_index or not embedding_client:
+        return ToolResult(tool_name=tool_name, success=False, content="Vector search client not available.")
+
+    try:
+        query_embedding = embedding_client.embed_content(
+            model='models/text-embedding-004',  # Using a modern, recommended model
+            content=query,
+            task_type="retrieval_query"
+        )['embedding']
+        
+        response = pinecone_index.query(
+            namespace=namespace,
+            vector=query_embedding,
+            top_k=top_k,
+            include_metadata=True
+        )
+        
+        if not response.get('matches'):
+            return ToolResult(tool_name=tool_name, success=True, content="No relevant information was found for this query.")
+
+        content_list = _format_pinecone_results(response['matches'])
+        return ToolResult(tool_name=tool_name, success=True, content="\n---\n".join(content_list))
+
+    except Exception as e:
+        logger.error(f"Error in '{tool_name}' tool: {e}", exc_info=True)
+        return ToolResult(tool_name=tool_name, success=False, content=f"An error occurred while executing the tool: {e}")
+
+# These are the concrete tool functions the ToolRouter will call.
+# Each one calls the generic helper with its specific namespace.
+def retrieve_clinical_data(query: str, query_meta: QueryMetadata) -> ToolResult:
+    return _vector_search_tool(query, "pbac-clinical", "retrieve_clinical_data")
+
+def retrieve_summary_data(query: str, query_meta: QueryMetadata) -> ToolResult:
+    return _vector_search_tool(query, "pbac-summary", "retrieve_summary_data")
+
+def retrieve_general_text(query: str, query_meta: QueryMetadata) -> ToolResult:
+    return _vector_search_tool(query, "pbac-text", "retrieve_general_text")
+
+# --- Graph Database Tool ---
+
+def query_knowledge_graph(query: str, query_meta: QueryMetadata) -> ToolResult:
+    """Generates and executes a Cypher query against the knowledge graph."""
+    tool_name = "query_knowledge_graph"
+    if not query_meta.question_is_graph_suitable:
+        return ToolResult(
+            tool_name=tool_name,
+            success=True, # Succeeded in its decision to not run
+            content="This question was determined to be unsuitable for the knowledge graph."
+        )
+
+    llm = get_google_ai_client().GenerativeModel('gemini-1.5-flash-latest')
+    driver = get_neo4j_driver()
+    if not llm or not driver:
+        return ToolResult(tool_name=tool_name, success=False, content="LLM or Neo4j client is not available.")
+
+    # Step 1: Generate the Cypher query
+    try:
+        # A more efficient schema retrieval for LLM prompts
+        with driver.session() as session:
+            schema_data = session.run("CALL db.schema.visualization()").data()
+        schema_str = f"Node labels and properties: {schema_data[0]['nodes']}\nRelationship types: {schema_data[0]['relationships']}"
+
+        prompt = CYPHER_GENERATION_PROMPT.format(schema=schema_str, question=query)
+        response = llm.generate_content(prompt)
+        cypher_query = response.text.strip().replace("```cypher", "").replace("```", "")
+        
+        if "none" in cypher_query.lower() or "match" not in cypher_query.lower():
+            logger.warning(f"LLM decided not to generate a Cypher query for: '{query}'")
+            return ToolResult(tool_name=tool_name, success=True, content="Could not generate a suitable graph query for this question.")
+
+        logger.info(f"Generated Cypher: {cypher_query}")
+    except Exception as e:
+        logger.error(f"Error during Cypher generation: {e}", exc_info=True)
+        return ToolResult(tool_name=tool_name, success=False, content=f"Cypher generation failed: {e}")
+
+    # Step 2: Execute the generated Cypher query
+    try:
+        with driver.session() as session:
+            records = session.run(cypher_query).data()
+
+        if not records:
+            return ToolResult(tool_name=tool_name, success=True, content="The graph query executed successfully but found no results.")
+        
+        results = []
+        for record in records:
+            if "p" in record and isinstance(record["p"], neo4j.graph.Path):
+                results.append(_serialize_neo4j_path(record["p"]))
+            else:
+                # Fallback for non-path results (e.g., RETURN count(n))
+                results.append(str(record))
+        
+        return ToolResult(tool_name=tool_name, success=True, content="\n".join(results))
+    
+    except Exception as e:
+        logger.error(f"Error during Cypher execution for query '{cypher_query}': {e}", exc_info=True)
+        return ToolResult(tool_name=tool_name, success=False, content=f"The generated Cypher query failed during execution: {e}")
 
 
 ########################################################################
 ### FILE: streamlit_app.py
 ########################################################################
 
-# streamlit_app.py
+# FILE: streamlit_app.py
+# V2.1: Final UI connected to the unified, logging-integrated Agent.
 
 import streamlit as st
 import logging
-from pathlib import Path
 from dotenv import load_dotenv
 
 # --- CRITICAL: Load environment variables at the very top ---
+# This ensures all modules can access them when imported.
 load_dotenv()
 
 # Now import project modules
-from src.agent import MainAgent
+from src.agent import Agent
+from src.tools.clients import get_google_ai_client # Used for a pre-flight check
 
-# --- Page Configuration ---
+# --- Page and Logging Configuration ---
 st.set_page_config(
     page_title="Persona RAG Chatbot",
-    page_icon="🤖",
+    page_icon="🧠",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# --- Logging ---
-logger = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - [%(levelname)s] - [%(name)s:%(lineno)d] - %(message)s'
 )
+logger = logging.getLogger(__name__)
 
 # --- Session State Initialization ---
-if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "assistant", "content": "How can I help you today as a Clinical Analyst?"}]
 if "agent" not in st.session_state:
     st.session_state.agent = None
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 if "current_persona" not in st.session_state:
-    st.session_state.current_persona = "clinical_analyst" # Use the key from the YAML file
+    st.session_state.current_persona = "clinical_analyst"
 
-
-# --- Helper function to re-initialize agent when persona changes ---
-def initialize_agent(persona_key: str):
-    persona_name = persona_key.replace('_', ' ').title()
+# --- Helper Functions ---
+@st.cache_resource
+def initialize_agent():
+    """
+    Initializes the agent once and caches it.
+    Returns the agent instance or None if initialization fails.
+    """
+    # Pre-flight check for API key to provide a better error message.
+    if not get_google_ai_client():
+        st.error("Google API Key is not configured. Please set the GOOGLE_API_KEY in your .env file.", icon="🚨")
+        return None
     try:
-        st.session_state.agent = MainAgent(persona=persona_key)
-        st.session_state.current_persona = persona_key
-        st.toast(f"Agent activated for '{persona_name}' persona.", icon="🧠")
-        logger.info(f"Agent initialized for persona: {persona_key}")
+        agent = Agent()
+        logger.info("Unified agent initialized successfully and cached for the session.")
+        return agent
     except Exception as e:
-        st.error(f"Failed to initialize agent for '{persona_name}': {e}", icon="🚨")
-        logger.error(f"Agent initialization failed for {persona_name}: {e}")
-        st.session_state.agent = None
+        st.error(f"Fatal error during agent initialization: {e}", icon="🚨")
+        logger.error(f"Agent initialization failed: {e}", exc_info=True)
+        return None
+
+def reset_chat(persona_name: str):
+    """Resets the chat history for a new conversation."""
+    st.session_state.messages = [
+        {"role": "assistant", "content": f"Hi! I'm now acting as a **{persona_name}**. How can I help you?"}
+    ]
 
 # --- Sidebar ---
 with st.sidebar:
     st.header("🤖 Persona RAG Chatbot")
+    st.markdown("Select a persona to tailor my retrieval strategy and answers to your specific role.")
 
     persona_options = {
         'Clinical Analyst': 'clinical_analyst',
@@ -1612,59 +1111,45 @@ with st.sidebar:
         'Regulatory Specialist': 'regulatory_specialist',
     }
     
-    # Get the display name from the key stored in session state
-    persona_display_name = [k for k, v in persona_options.items() if v == st.session_state.current_persona][0]
+    current_display_name = [k for k, v in persona_options.items() if v == st.session_state.current_persona][0]
     
     selected_persona_name = st.radio(
         "**Choose your Persona:**",
         options=persona_options.keys(),
-        index=list(persona_options.keys()).index(persona_display_name)
+        index=list(persona_options.keys()).index(current_display_name),
+        key="persona_selector"
     )
-
+    
     selected_persona_key = persona_options[selected_persona_name]
 
-    # If persona has changed, re-initialize the agent
     if selected_persona_key != st.session_state.current_persona:
-        initialize_agent(selected_persona_key)
-        # Reset chat for the new persona
-        st.session_state.messages = [{"role": "assistant", "content": f"How can I help you today as a {selected_persona_name}?"}]
+        st.session_state.current_persona = selected_persona_key
+        reset_chat(selected_persona_name)
         st.rerun()
 
     st.divider()
-    st.markdown("### 🧪 Test Questions")
+    if st.button("🔄 Clear Chat History", use_container_width=True):
+        reset_chat(selected_persona_name)
+        st.rerun()
 
-    test_questions = [
-        "What company sponsors Abaloparatide?",
-        "Tell me about the submission for non-small cell lung cancer.",
-        "Which condition does Abaloparatide treat?",
-        "Was the sponsor Janssen involved in any 2025 submissions?",
-        "What is the cost-effectiveness of drugs for lung cancer?", # Good for Health Economist
-    ]
-    
-    with st.expander("Example Questions"):
-        for q in test_questions:
-            if st.button(q, key=q, use_container_width=True):
-                st.session_state.run_prompt = q
-                st.session_state.chat_input = "" # Clear input box
+# --- Main Chat Interface ---
+st.title("Persona-Aware RAG Agent")
+st.caption(f"Currently acting as: **{selected_persona_name}**")
 
-# --- Main Section ---
-st.title(f"Persona: {selected_persona_name}")
+# Initialize agent on first run and handle potential failure.
+if st.session_state.agent is None:
+    st.session_state.agent = initialize_agent()
+    # If this is the first run, set the initial message.
+    if not st.session_state.messages:
+        reset_chat(selected_persona_name)
 
-# Initialize agent on first run
-if not st.session_state.agent:
-    initialize_agent(st.session_state.current_persona)
+# Display chat messages
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"], unsafe_allow_html=True)
 
-# --- Chat History Display ---
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-# --- Handle User Input ---
-prompt_from_button = st.session_state.pop("run_prompt", None)
-prompt_from_input = st.chat_input("Your question...", key="chat_input_box")
-prompt = prompt_from_button or prompt_from_input
-
-if prompt:
+# Handle user input
+if prompt := st.chat_input("Ask your question..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -1672,20 +1157,12 @@ if prompt:
     with st.chat_message("assistant"):
         if st.session_state.agent:
             with st.spinner(f"Thinking as a {selected_persona_name}..."):
-                try:
-                    response = st.session_state.agent.run(prompt)
-                    st.markdown(response)
-                    st.session_state.messages.append({"role": "assistant", "content": response})
-                except Exception as e:
-                    error_message = f"An unexpected error occurred: {e}"
-                    st.error(error_message)
-                    logger.error(f"Error during agent run: {e}", exc_info=True)
-                    st.session_state.messages.append({"role": "assistant", "content": error_message})
+                response = st.session_state.agent.run(prompt, persona=st.session_state.current_persona)
+                st.markdown(response, unsafe_allow_html=True)
+                st.session_state.messages.append({"role": "assistant", "content": response})
         else:
-            st.error("The agent is not initialized. Please check the logs for errors.")
-
-    # Rerun to clear the input box if a button was used, or to reflect the new state
-    st.rerun()
+            st.error("Agent is not available due to an initialization error. Please check the terminal logs.")
+            st.stop()
 
 
 ########################################################################

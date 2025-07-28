@@ -1,5 +1,5 @@
 # FILE: src/agent.py
-# V2.1: Unified Agent with Integrated Trace Logging
+# V2.2: Corrected agent with a robust final logging block.
 import logging
 import json
 import time
@@ -17,13 +17,14 @@ from src.prompts import SYNTHESIS_PROMPT
 
 logger = logging.getLogger(__name__)
 
-### NEW: Logging Integration - Logic from middleware is now here ###
 LOG_PATH = Path("trace_logs.jsonl")
 
 class Timer:
     """A context manager for timing code blocks."""
     def __enter__(self):
         self.start = time.perf_counter()
+        # Initialize duration to ensure the attribute always exists
+        self.duration = -1.0
         return self
 
     def __exit__(self, *args):
@@ -58,7 +59,6 @@ def log_trace(
         logger.info(f"Trace logged successfully to {LOG_PATH.resolve()}")
     except Exception as e:
         logger.error(f"Failed to write trace log: {e}", exc_info=True)
-### End of Logging Integration ###
 
 
 class Agent:
@@ -84,15 +84,16 @@ class Agent:
 
     def run(self, query: str, persona: str) -> str:
         """Executes the full agent loop with integrated timing and logging."""
-        # Initialize variables for the log trace
         query_meta, tool_plan, results, final_answer = None, [], [], ""
-        
-        with Timer() as timer:
-            try:
+        timer = Timer() # Instantiate the timer manually
+
+        try:
+            with timer: # Use the instantiated timer as a context manager
                 logger.info(f"Agent starting run for persona '{persona}' with query: '{query}'")
 
                 if not self.llm:
-                    return "Error: The AI model for synthesizing answers is not available. Please check API key configuration."
+                    final_answer = "Error: The AI model for synthesizing answers is not available. Please check API key configuration."
+                    return final_answer
 
                 query_meta = self.classifier.classify(query)
                 if not query_meta:
@@ -122,11 +123,11 @@ class Agent:
                 logger.info("Agent run completed successfully.")
                 return final_answer
 
-            except Exception as e:
-                logger.error(f"An unexpected error occurred during agent run: {e}", exc_info=True)
-                final_answer = f"I encountered a critical error: {e}. Please check the system logs."
-                return final_answer
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during agent run: {e}", exc_info=True)
+            final_answer = f"I encountered a critical error: {e}. Please check the system logs."
+            return final_answer
 
-            finally:
-                # This block ensures that a trace is logged regardless of success or failure.
-                log_trace(query, persona, query_meta, tool_plan, results, final_answer, timer.duration)
+        finally:
+            # THE FIX: The timer's __exit__ has now been called, so timer.duration is guaranteed to exist.
+            log_trace(query, persona, query_meta, tool_plan, results, final_answer, timer.duration)

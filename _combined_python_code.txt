@@ -1,6 +1,6 @@
 ========================================================================
   Combined Python Files from Git Repository: /home/mit/persona_rag_chatbot
-  Generated on: Mon 28 Jul 2025 17:45:43 AEST
+  Generated on: Mon 28 Jul 2025 19:03:26 AEST
 ========================================================================
 
 
@@ -17,7 +17,9 @@
 ########################################################################
 
 # FILE: src/agent.py
-# V2.1: Unified Agent with Integrated Trace Logging
+# V2.5 (Definitive Fix): Simplifies the context formatting logic completely.
+# It now directly joins the clean, pre-formatted output from the tools.
+
 import logging
 import json
 import time
@@ -34,34 +36,21 @@ from src.fallback import should_trigger_fallback, render_fallback_message
 from src.prompts import SYNTHESIS_PROMPT
 
 logger = logging.getLogger(__name__)
-
-### NEW: Logging Integration - Logic from middleware is now here ###
 LOG_PATH = Path("trace_logs.jsonl")
 
 class Timer:
-    """A context manager for timing code blocks."""
     def __enter__(self):
         self.start = time.perf_counter()
+        self.duration = -1.0
         return self
-
     def __exit__(self, *args):
         self.end = time.perf_counter()
         self.duration = self.end - self.start
 
-def log_trace(
-    query: str,
-    persona: str,
-    query_meta: QueryMetadata,
-    tool_plan: List[ToolPlanItem],
-    tool_results: List[ToolResult],
-    final_answer: str,
-    total_latency_sec: float
-):
-    """Writes a structured JSON line capturing the full agent loop."""
+def log_trace(query: str, persona: str, query_meta: QueryMetadata, tool_plan: List[ToolPlanItem], tool_results: List[ToolResult], final_answer: str, total_latency_sec: float):
     trace_record = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
-        "query": query,
-        "persona": persona,
+        "query": query, "persona": persona,
         "intent": query_meta.intent if query_meta else "classification_failed",
         "graph_suitable": query_meta.question_is_graph_suitable if query_meta else "unknown",
         "tool_plan": [t.model_dump() for t in tool_plan],
@@ -69,108 +58,65 @@ def log_trace(
         "final_answer_preview": final_answer[:200] + "..." if final_answer else "N/A",
         "total_latency_sec": round(total_latency_sec, 3)
     }
-
     try:
         with open(LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(trace_record) + "\n")
         logger.info(f"Trace logged successfully to {LOG_PATH.resolve()}")
     except Exception as e:
         logger.error(f"Failed to write trace log: {e}", exc_info=True)
-### End of Logging Integration ###
-
 
 class Agent:
     def __init__(self, confidence_threshold: float = 0.85):
         self.classifier = QueryClassifier()
         self.planner = ToolPlanner(coverage_threshold=confidence_threshold)
         self.router = ToolRouter()
-        
         genai_client = get_google_ai_client()
-        if genai_client:
-            self.llm = genai_client.GenerativeModel('gemini-1.5-pro-latest')
-        else:
-            self.llm = None
-            logger.error("FATAL: Gemini client could not be initialized. Agent synthesis will fail.")
+        self.llm = genai_client.GenerativeModel('gemini-1.5-pro-latest') if genai_client else None
+        if not self.llm: logger.error("FATAL: Gemini client could not be initialized.")
 
-    def _format_context_for_synthesis(self, results: List[ToolResult]) -> str:
-        context_str = ""
-        for res in results:
-            if res.success and res.content and "no relevant information" not in res.content.lower():
-                context_str += f"--- Evidence from Tool: {res.tool_name} ---\n"
-                context_str += f"{res.content.strip()}\n\n"
-        return context_str.strip()
+    # --- START OF DEFINITIVE FIX ---
+    # REMOVED the old _format_context_for_synthesis function entirely.
+    # --- END OF DEFINITIVE FIX ---
 
     def run(self, query: str, persona: str) -> str:
-        """Executes the full agent loop with integrated timing and logging."""
-        # Initialize variables for the log trace
         query_meta, tool_plan, results, final_answer = None, [], [], ""
-        
-        with Timer() as timer:
-            try:
-                logger.info(f"Agent starting run for persona '{persona}' with query: '{query}'")
-
-                if not self.llm:
-                    return "Error: The AI model for synthesizing answers is not available. Please check API key configuration."
-
+        timer = Timer()
+        try:
+            with timer:
+                if not self.llm: return "Error: AI model not available."
                 query_meta = self.classifier.classify(query)
-                if not query_meta:
-                    final_answer = "I'm sorry, I had trouble understanding your question. Could you please rephrase it?"
-                    return final_answer
+                if not query_meta: return "I'm sorry, I had trouble understanding your question."
 
                 tool_plan = self.planner.plan(query_meta, persona)
-                if not tool_plan:
-                    final_answer = "I'm sorry, I don't have a configured strategy to answer that question for your selected persona."
-                    return final_answer
+                if not tool_plan: return "I'm sorry, I don't have a configured strategy for this persona."
 
-                logger.info(f"Executing tool plan: {[item.tool_name for item in tool_plan]}")
                 for plan_item in tool_plan:
                     results.append(self.router.execute_tool(plan_item.tool_name, query, query_meta))
 
-                if should_trigger_fallback(results):
-                    final_answer = render_fallback_message(query)
-                    return final_answer
+                if should_trigger_fallback(results): return render_fallback_message(query)
 
-                formatted_context = self._format_context_for_synthesis(results)
+                # --- START OF DEFINITIVE FIX ---
+                # This is the new, simplified context assembly logic.
+                # It filters for successful tools with real content and joins them.
+                successful_content = [
+                    res.content for res in results 
+                    if res.success and res.content and "no relevant information" not in res.content.lower()
+                ]
+                formatted_context = "\n---\n".join(successful_content)
+                # --- END OF DEFINITIVE FIX ---
+
                 if not formatted_context:
-                    final_answer = "I was able to search for information but could not find any relevant details to answer your question."
-                    return final_answer
+                    return "I searched for information but could not find any relevant details."
                 
                 final_prompt = SYNTHESIS_PROMPT.format(question=query, context_str=formatted_context)
                 final_answer = self.llm.generate_content(final_prompt).text
-                logger.info("Agent run completed successfully.")
                 return final_answer
-
-            except Exception as e:
-                logger.error(f"An unexpected error occurred during agent run: {e}", exc_info=True)
-                final_answer = f"I encountered a critical error: {e}. Please check the system logs."
-                return final_answer
-
-            finally:
-                # This block ensures that a trace is logged regardless of success or failure.
-                log_trace(query, persona, query_meta, tool_plan, results, final_answer, timer.duration)
-
-
-########################################################################
-### FILE: src/common_utils.py
-########################################################################
-
-# src/common_utils.py
-
-"""
-Common utility functions shared across the application.
-"""
-
-from pathlib import Path
-
-def get_project_root() -> Path:
-    """
-    Returns the absolute path to the project root directory.
-
-    This is a robust way to reference files (like configs) from anywhere
-    within the project, regardless of where the script is run from.
-    """
-    # We assume this file is in 'src/'. The project root is one level up.
-    return Path(__file__).parent.parent.resolve()
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during agent run: {e}", exc_info=True)
+            final_answer = f"I encountered a critical error. Please check the system logs."
+            return final_answer
+        finally:
+            log_trace(query, persona, query_meta, tool_plan, results, final_answer, timer.duration)
 
 
 ########################################################################
@@ -227,67 +173,6 @@ However, here are some things you can try next:
     msg += "\nYou can also try rephrasing your question for better results."
     return msg.strip()
 
-
-
-########################################################################
-### FILE: src/middleware/logging.py
-########################################################################
-
-# FILE: src/middleware/logging.py
-# Phase 3.2: LoggingMiddleware — structured trace logs per query execution
-
-import json
-import time
-import logging
-from pathlib import Path
-from typing import List
-from datetime import datetime
-
-from src.models import ToolResult, ToolPlanItem, QueryMetadata
-
-logger = logging.getLogger(__name__)
-
-LOG_PATH = Path("trace_logs.jsonl")  # Can be adjusted per environment
-
-
-def log_trace(
-    query: str,
-    query_meta: QueryMetadata,
-    tool_plan: List[ToolPlanItem],
-    tool_results: List[ToolResult],
-    total_latency_sec: float
-):
-    """
-    Writes a structured JSON line capturing the full agent loop.
-    """
-    trace_record = {
-        "timestamp": datetime.utcnow().isoformat(),
-        "query": query,
-        "intent": query_meta.intent,
-        "graph_suitable": query_meta.question_is_graph_suitable,
-        "keywords": query_meta.keywords,
-        "tool_plan": [t.model_dump() for t in tool_plan],
-        "tool_results": [r.model_dump() for r in tool_results],
-        "total_latency_sec": round(total_latency_sec, 3)
-    }
-
-    try:
-        with open(LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(trace_record) + "\n")
-        logger.info(f"Trace logged to {LOG_PATH.resolve()}")
-    except Exception as e:
-        logger.error(f"Failed to write trace log: {e}", exc_info=True)
-
-
-# Optional context manager for timing
-class Timer:
-    def __enter__(self):
-        self.start = time.time()
-        return self
-
-    def __exit__(self, *args):
-        self.end = time.time()
-        self.duration = self.end - self.start
 
 
 ########################################################################
@@ -351,54 +236,6 @@ class RetrievalPlan(BaseModel):
 ### FILE: src/planner/__init__.py
 ########################################################################
 
-
-
-
-########################################################################
-### FILE: src/planner/confidence.py
-########################################################################
-
-# FILE: src/planner/confidence.py
-# Phase 1.3: ToolConfidenceScorer — measures cumulative information coverage from tool results
-
-import logging
-from typing import List
-from src.models import ToolResult
-
-logger = logging.getLogger(__name__)
-
-class ToolConfidenceScorer:
-    """
-    Recomputes cumulative coverage score after each tool reply based on:
-    - Number of unique content blocks retrieved
-    - Citation span coverage (placeholder)
-    - Matching keywords (optional)
-    """
-    def __init__(self, min_threshold: float = 0.9):
-        self.coverage_threshold = min_threshold
-
-    def compute_total_coverage(self, results: List[ToolResult]) -> float:
-        """Computes cumulative estimated coverage based on tool-level metadata."""
-        total_coverage = sum([r.estimated_coverage for r in results if r.success])
-        logger.info(f"Total cumulative coverage: {total_coverage:.2f}")
-        return round(total_coverage, 3)
-
-    def has_sufficient_coverage(self, results: List[ToolResult]) -> bool:
-        coverage = self.compute_total_coverage(results)
-        return coverage >= self.coverage_threshold
-
-# Test block
-if __name__ == "__main__":
-    from src.models import ToolResult
-
-    results = [
-        ToolResult(tool_name="pinecone", estimated_coverage=0.6, success=True),
-        ToolResult(tool_name="neo4j", estimated_coverage=0.35, success=True),
-        ToolResult(tool_name="pdf", estimated_coverage=0.2, success=False)
-    ]
-
-    scorer = ToolConfidenceScorer()
-    print("Coverage met:", scorer.has_sufficient_coverage(results))
 
 
 
@@ -573,10 +410,35 @@ class ToolPlanner:
 ### FILE: src/prompts.py
 ########################################################################
 
-# src/prompts.py
+# FILE: src/prompts.py
+# V2.1: Updated Cypher prompt for case-insensitive matching.
 
 """
 Production-grade prompts for a robust RAG agent.
+"""
+
+QUERY_CLASSIFICATION_PROMPT = """
+You are an expert query analysis agent. Your task is to analyze the user's question and provide a structured JSON output with three fields: 'intent', 'keywords', and 'question_is_graph_suitable'.
+
+1.  **'intent'**: Classify the user's goal into one of these categories:
+    *   "specific_fact_lookup": For questions seeking a single, direct answer (e.g., "What company sponsors Drug X?").
+    *   "simple_summary": For questions asking for a general overview (e.g., "Tell me about Drug Y.").
+    *   "comparative_analysis": For questions that compare two or more items (e.g., "Compare Drug A and Drug B.").
+    *   "general_qa": For all other questions.
+
+2.  **'keywords'**: Extract the most important nouns and proper nouns from the question, such as drug names, company names, or medical conditions. Return them as a list of strings.
+
+3.  **'question_is_graph_suitable'**: Return `true` if the question involves relationships between entities (e.g., drug-to-sponsor, drug-to-condition), which are suitable for a knowledge graph. Otherwise, return `false`.
+
+Output ONLY the raw JSON object. Do not add explanations or markdown formatting.
+
+Example Question: "What is the cost-effectiveness of Abaloparatide for treating osteoporosis, and who is the sponsor?"
+Example JSON Output:
+{
+  "intent": "specific_fact_lookup",
+  "keywords": ["Abaloparatide", "osteoporosis", "cost-effectiveness", "sponsor"],
+  "question_is_graph_suitable": true
+}
 """
 
 # REFACTORED: The Cypher generation prompt is now more robust and correctly
@@ -587,8 +449,8 @@ You are an expert Neo4j Cypher query developer. Your task is to convert a user's
 **Live Graph Schema:**
 {schema}
 
-**Instructions:**
-1.  Analyze the schema to understand the available node labels, properties, and relationships.
+**CRITICAL Instructions:**
+1.  **Use the Normalized Property:** You MUST query against the `name_normalized` property for all `WHERE` clauses. The user's input should be converted to lowercase. For example: `WHERE a.name_normalized = 'abaloparatide'`.
 2.  Construct a Cypher query that retrieves relevant information to answer the question.
 3.  The query MUST be read-only (i.e., use `MATCH` and `RETURN`). Do not use `CREATE`, `MERGE`, `SET`, or `DELETE`.
 4.  If possible, return a path `p` using `RETURN p` to show the full context of the connection.
@@ -596,7 +458,7 @@ You are an expert Neo4j Cypher query developer. Your task is to convert a user's
 6.  Output ONLY the Cypher query or the word `NONE`. Do not add explanations, greetings, or markdown formatting like ```cypher.
 
 **Example Question:** "What company sponsors Abaloparatide?"
-**Example Valid Query:** MATCH p=(drug:Drug {{name: 'Abaloparatide'}})-[:SPONSORED_BY]->(sponsor:Sponsor) RETURN p
+**Example Valid Query:** MATCH p=(drug:Entity)-[:HASSPONSOR]->(sponsor:Entity) WHERE drug.name_normalized = 'abaloparatide' RETURN p
 
 **Task:**
 Generate a Cypher query for the question below.
@@ -604,24 +466,47 @@ Generate a Cypher query for the question below.
 **Question:** {question}
 """
 
+# --- START OF FINAL FIX ---
+# This new SYNTHESIS_PROMPT is much more directive and strict.
 SYNTHESIS_PROMPT = """
-You are an AI assistant, an 'Inter-Expert Interpreter'. Your role is to deliver a comprehensive, accurate, and perfectly cited answer using ONLY the provided context.
+You are a highly precise AI assistant for pharmaceutical and regulatory analysis. Your task is to answer a user's question based *only* on the provided evidence. You must follow all rules strictly.
 
 **User's Question:** "{question}"
 
 *** YOUR INSTRUCTIONS ***
-1.  **Synthesize a Complete Answer**: Read all the provided context blocks and synthesize a single, cohesive answer to the user's question.
-2.  **Cite Your Sources**: As you write, you MUST cite every fact. To do this, find the `Source Citation` for the context block you are using and place it directly after the fact it supports.
-3.  **Create a Reference List**: After your main answer, create a "References" section. List each unique source you cited in a numbered list.
-4.  **Be Honest**: If the context is insufficient to answer the question, you must state that clearly. Do not invent information.
 
+**Rule 1: Synthesize a Factual Answer**
+- Read all the provided "Evidence" blocks below.
+- Formulate a single, comprehensive answer to the user's question.
+- **Do not mention the tools** (e.g., "query_knowledge_graph", "retrieve_clinical_data"). The user only cares about the information, not the source tool.
+
+**Rule 2: Cite Every Fact with Clickable Links**
+- The evidence contains Markdown-formatted citations like `[Source: DOC_ID, Page: X](URL)`.
+- As you write your answer, you MUST place the corresponding citation immediately after the sentence or clause it supports.
+- If multiple pieces of evidence support a single sentence, include all their citations. For example: `This is a fact [Source: Doc A, Page: 1](url) [Source: Doc B, Page: 5](url).`
+
+**Rule 3: Create a Clean Reference List**
+- After your answer, create a "References" section.
+- List each unique clickable Markdown citation link that you used in your answer.
+- **Do NOT list tool names or any other text in the references.**
+
+**Rule 4: Honesty is Critical**
+- If the provided evidence is insufficient to answer the question, you MUST state that clearly. For example: "Based on the available documents, I could not find information about X."
+- Do not invent, infer, or use outside knowledge.
+
+**Example of a PERFECT response:**
+Theramex Australia Pty Ltd sponsors the drug Abaloparatide Source: July-2025-PBAC-Meeting-v4, Page: 2. It is indicated for the treatment of severe established osteoporosis Source: July-2025-PBAC-Meeting-v4, Page: 2.
+References
+Source: July-2025-PBAC-Meeting-v4, Page: 2
+Generated code
 ---
-**CONTEXT:**
+**Evidence:**
 {context_str}
 ---
 
 **ANSWER:**
 """
+# --- END OF FINAL FIX ---
 
 
 ########################################################################
@@ -629,89 +514,6 @@ You are an AI assistant, an 'Inter-Expert Interpreter'. Your role is to deliver 
 ########################################################################
 
 
-
-
-########################################################################
-### FILE: src/router/persona_router.py
-########################################################################
-
-# src/routing/persona_router.py
-
-import logging
-import yaml
-from pathlib import Path
-from typing import List
-
-from src.common_utils import get_project_root
-from src.models import RetrievalPlan, NamespaceConfig # REFACTORED: Use Pydantic models
-
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - [%(levelname)s] - %(message)s')
-logger = logging.getLogger(__name__)
-
-# REFACTORED: A constant to scale retrieval depth by weight.
-# A weight of 1.0 will result in top_k=15, 0.5 will result in top_k=7.
-BASE_TOP_K = 15
-
-class PersonaRouter:
-    """
-    Loads a persona-to-namespace map and creates a structured retrieval plan.
-    It translates a persona into a list of weighted, configured namespaces to query.
-    """
-    def __init__(self, map_file_path: Path = None):
-        """
-        Initializes the router by loading the persona-to-namespace map.
-        """
-        if map_file_path is None:
-            self.map_file_path = get_project_root() / "config" / "persona_namespace_map.yml"
-        else:
-            self.map_file_path = map_file_path
-
-        try:
-            with open(self.map_file_path, 'r') as f:
-                self.persona_map = yaml.safe_load(f)
-            logger.info(f"Successfully loaded persona map from {self.map_file_path}")
-        except FileNotFoundError:
-            logger.error(f"FATAL: Persona map file not found at {self.map_file_path}")
-            # REFACTORED: Raise an exception instead of calling st.error
-            raise
-        except Exception as e:
-            logger.error(f"FATAL: Error loading or parsing persona map file: {e}")
-            self.persona_map = {}
-
-    def get_retrieval_plan(self, persona: str) -> RetrievalPlan:
-        """
-        Gets the structured retrieval plan for a given persona.
-
-        Args:
-            persona: The name of the persona (e.g., 'Clinical Analyst').
-
-        Returns:
-            A RetrievalPlan object containing a list of configured namespaces.
-        """
-        normalized_persona = persona.lower().replace(" ", "_")
-        persona_configs = self.persona_map.get(normalized_persona, self.persona_map.get('default', []))
-
-        if not persona_configs:
-            logger.warning(f"No plan found for persona '{normalized_persona}' or default. Returning empty plan.")
-            return RetrievalPlan()
-
-        # REFACTORED: Create NamespaceConfig models, now using the 'weight'
-        namespace_configs = []
-        for item in persona_configs:
-            weight = item.get('weight', 1.0)
-            # Dynamically calculate top_k based on weight
-            top_k = int(max(3, BASE_TOP_K * weight))
-            
-            config = NamespaceConfig(
-                namespace=item['namespace'],
-                weight=weight,
-                top_k=top_k
-            )
-            namespace_configs.append(config)
-        
-        plan = RetrievalPlan(namespaces=namespace_configs)
-        logger.info(f"Retrieval plan for persona '{persona}': {plan.model_dump_json(indent=2)}")
-        return plan
 
 
 ########################################################################
@@ -801,7 +603,7 @@ class ToolRouter:
 
 
 ########################################################################
-### FILE: src/tools/client.py
+### FILE: src/tools/clients.py
 ########################################################################
 
 # FILE: src/tools/clients.py
@@ -881,16 +683,10 @@ def get_neo4j_driver() -> neo4j.Driver:
 ########################################################################
 
 # FILE: src/tools/retrievers.py
-# V2.0: Centralized, tool-based retrieval functions.
-"""
-This module contains the actual "tools" the agent can execute.
-Each function corresponds to a tool name, fetches data from a source,
-and returns a standardized ToolResult.
-"""
+# V3.0 (Production Ready): Final, confirmed version.
 
 import logging
 from typing import List
-
 import neo4j
 
 from src.tools.clients import get_google_ai_client, get_pinecone_index, get_neo4j_driver
@@ -902,135 +698,85 @@ logger = logging.getLogger(__name__)
 # --- Helper Functions ---
 
 def _format_pinecone_results(matches: List[dict]) -> List[str]:
-    """Standardizes Pinecone matches into a list of content strings with clear citations."""
     contents = []
     for match in matches:
         metadata = match.get('metadata', {})
         text = metadata.get('text', 'No content available.')
         doc_id = metadata.get('doc_id', 'Unknown Document')
-        page_num = metadata.get('page_number') or metadata.get('page', 'N/A')
-        score = match.get('score', 0.0)
-        
-        # Format a clean citation string for the LLM to use
-        citation = f"[Source: {doc_id}, Page: {page_num}, Similarity: {score:.2f}]"
+        page_num = metadata.get('page_number', 'N/A')
+        url = metadata.get('source_pdf_url', '#')
+        citation = f"[Source: {doc_id}, Page: {page_num}]({url})"
         contents.append(f"{text}\n{citation}")
-        
     return contents
 
 def _serialize_neo4j_path(path: neo4j.graph.Path) -> str:
-    """Helper to convert a Neo4j Path into a readable text representation."""
-    nodes_str = []
-    for i, node in enumerate(path.nodes):
-        node_label = next(iter(node.labels), "Node")
-        name = node.get('name', node.get('id', 'Unknown'))
-        nodes_str.append(f"({name}:{node_label})")
-        if i < len(path.relationships):
-            rel = path.relationships[i]
-            nodes_str.append(f"-[{rel.type}]->")
-    return "".join(nodes_str)
+    citations = set()
+    if len(path.nodes) == 2 and len(path.relationships) == 1:
+        subject = path.start_node.get('name', 'Unknown')
+        predicate = path.relationships[0].type.replace('_', ' ').lower()
+        object_val = path.end_node.get('name', 'Unknown')
+        rel = path.relationships[0]
+        
+        doc_id = rel.get('doc_id', 'Unknown Document')
+        url = rel.get('source_pdf_url', '#')
+        page_num = rel.get('page_numbers', 'N/A')
+        citation = f"[Source: {doc_id}, Page: {page_num}]({url})"
+        citations.add(citation)
+        
+        text_representation = f"{subject} {predicate} {object_val}."
+        citation_str = " ".join(sorted(list(citations)))
+        return f"{text_representation}\n{citation_str}"
 
-# --- Vector Search Tools ---
+    return f"A complex relationship was found in the knowledge graph.\n[Source: Knowledge Graph, Page: N/A](#)"
 
 def _vector_search_tool(query: str, namespace: str, tool_name: str, top_k: int = 7) -> ToolResult:
-    """Generic, reusable vector search tool for a specific Pinecone namespace."""
     pinecone_index = get_pinecone_index()
     embedding_client = get_google_ai_client()
-    if not pinecone_index or not embedding_client:
-        return ToolResult(tool_name=tool_name, success=False, content="Vector search client not available.")
-
+    if not pinecone_index or not embedding_client: return ToolResult(tool_name=tool_name, success=False, content="Vector search client not available.")
     try:
-        query_embedding = embedding_client.embed_content(
-            model='models/text-embedding-004',  # Using a modern, recommended model
-            content=query,
-            task_type="retrieval_query"
-        )['embedding']
-        
-        response = pinecone_index.query(
-            namespace=namespace,
-            vector=query_embedding,
-            top_k=top_k,
-            include_metadata=True
-        )
-        
-        if not response.get('matches'):
-            return ToolResult(tool_name=tool_name, success=True, content="No relevant information was found for this query.")
-
+        query_embedding = embedding_client.embed_content(model='models/text-embedding-004', content=query, task_type="retrieval_query")['embedding']
+        response = pinecone_index.query(namespace=namespace, vector=query_embedding, top_k=top_k, include_metadata=True)
+        if not response.get('matches'): return ToolResult(tool_name=tool_name, success=True, content="")
         content_list = _format_pinecone_results(response['matches'])
         return ToolResult(tool_name=tool_name, success=True, content="\n---\n".join(content_list))
-
     except Exception as e:
-        logger.error(f"Error in '{tool_name}' tool: {e}", exc_info=True)
-        return ToolResult(tool_name=tool_name, success=False, content=f"An error occurred while executing the tool: {e}")
+        return ToolResult(tool_name=tool_name, success=False, content=f"An error occurred in the tool: {e}")
 
-# These are the concrete tool functions the ToolRouter will call.
-# Each one calls the generic helper with its specific namespace.
 def retrieve_clinical_data(query: str, query_meta: QueryMetadata) -> ToolResult:
     return _vector_search_tool(query, "pbac-clinical", "retrieve_clinical_data")
-
 def retrieve_summary_data(query: str, query_meta: QueryMetadata) -> ToolResult:
     return _vector_search_tool(query, "pbac-summary", "retrieve_summary_data")
-
 def retrieve_general_text(query: str, query_meta: QueryMetadata) -> ToolResult:
     return _vector_search_tool(query, "pbac-text", "retrieve_general_text")
 
-# --- Graph Database Tool ---
-
 def query_knowledge_graph(query: str, query_meta: QueryMetadata) -> ToolResult:
-    """Generates and executes a Cypher query against the knowledge graph."""
     tool_name = "query_knowledge_graph"
-    if not query_meta.question_is_graph_suitable:
-        return ToolResult(
-            tool_name=tool_name,
-            success=True, # Succeeded in its decision to not run
-            content="This question was determined to be unsuitable for the knowledge graph."
-        )
-
+    if not query_meta.question_is_graph_suitable: return ToolResult(tool_name=tool_name, success=True, content="")
     llm = get_google_ai_client().GenerativeModel('gemini-1.5-flash-latest')
     driver = get_neo4j_driver()
-    if not llm or not driver:
-        return ToolResult(tool_name=tool_name, success=False, content="LLM or Neo4j client is not available.")
-
-    # Step 1: Generate the Cypher query
+    if not llm or not driver: return ToolResult(tool_name=tool_name, success=False, content="LLM or Neo4j client is not available.")
     try:
-        # A more efficient schema retrieval for LLM prompts
         with driver.session() as session:
             schema_data = session.run("CALL db.schema.visualization()").data()
         schema_str = f"Node labels and properties: {schema_data[0]['nodes']}\nRelationship types: {schema_data[0]['relationships']}"
-
         prompt = CYPHER_GENERATION_PROMPT.format(schema=schema_str, question=query)
         response = llm.generate_content(prompt)
         cypher_query = response.text.strip().replace("```cypher", "").replace("```", "")
-        
-        if "none" in cypher_query.lower() or "match" not in cypher_query.lower():
-            logger.warning(f"LLM decided not to generate a Cypher query for: '{query}'")
-            return ToolResult(tool_name=tool_name, success=True, content="Could not generate a suitable graph query for this question.")
-
+        if "none" in cypher_query.lower() or "match" not in cypher_query.lower(): return ToolResult(tool_name=tool_name, success=True, content="")
         logger.info(f"Generated Cypher: {cypher_query}")
     except Exception as e:
-        logger.error(f"Error during Cypher generation: {e}", exc_info=True)
         return ToolResult(tool_name=tool_name, success=False, content=f"Cypher generation failed: {e}")
-
-    # Step 2: Execute the generated Cypher query
     try:
         with driver.session() as session:
             records = session.run(cypher_query).data()
-
-        if not records:
-            return ToolResult(tool_name=tool_name, success=True, content="The graph query executed successfully but found no results.")
-        
-        results = []
-        for record in records:
-            if "p" in record and isinstance(record["p"], neo4j.graph.Path):
-                results.append(_serialize_neo4j_path(record["p"]))
-            else:
-                # Fallback for non-path results (e.g., RETURN count(n))
-                results.append(str(record))
-        
+        if not records: return ToolResult(tool_name=tool_name, success=True, content="")
+        results = [
+            _serialize_neo4j_path(record["p"]) if "p" in record and isinstance(record["p"], neo4j.graph.Path) else f"{str(record)}\n[Source: Knowledge Graph, Page: N/A](#)"
+            for record in records
+        ]
         return ToolResult(tool_name=tool_name, success=True, content="\n".join(results))
-    
     except Exception as e:
-        logger.error(f"Error during Cypher execution for query '{cypher_query}': {e}", exc_info=True)
-        return ToolResult(tool_name=tool_name, success=False, content=f"The generated Cypher query failed during execution: {e}")
+        return ToolResult(tool_name=tool_name, success=False, content=f"Cypher execution failed: {e}")
 
 
 ########################################################################
@@ -1038,7 +784,7 @@ def query_knowledge_graph(query: str, query_meta: QueryMetadata) -> ToolResult:
 ########################################################################
 
 # FILE: streamlit_app.py
-# V2.1: Final UI connected to the unified, logging-integrated Agent.
+# V2.2: UI updated with categorized test questions for robust evaluation.
 
 import streamlit as st
 import logging
@@ -1132,6 +878,50 @@ with st.sidebar:
         reset_chat(selected_persona_name)
         st.rerun()
 
+    st.divider()
+    st.header("🧪 Evaluation Questions")
+    st.markdown("Use these questions to test the agent's capabilities.")
+
+    # --- NEW: Categorized Test Questions ---
+    with st.expander("🎯 Fact Retrieval (High Precision)"):
+        questions = {
+            "Graph-based query": "What company sponsors the drug Abaloparatide?",
+            "Specific indication": "Which condition is Amivantamab intended to treat?",
+            "Dosage form lookup": "What is the dosage form of Daratumumab?",
+            "Sponsor for combination": "Which sponsor is associated with the combination of Dabrafenib and Trametinib?",
+        }
+        for name, q in questions.items():
+            if st.button(f"{name}: {q}", key=q, use_container_width=True):
+                st.session_state.run_prompt = q
+
+    with st.expander("⚖️ Comparative Analysis"):
+        questions = {
+            "Compare two drugs for NSCLC": "Compare Amivantamab and Osimertinib for non-small cell lung cancer.",
+            "Compare submissions by date": "What were the key differences in submissions between the March and July 2025 PBAC meetings?",
+        }
+        for name, q in questions.items():
+            if st.button(q, key=q, use_container_width=True):
+                st.session_state.run_prompt = q
+    
+    with st.expander("📋 Summarization"):
+        questions = {
+            "Summarize a drug's submission": "Provide a summary of the PBAC submission for Alectinib.",
+            "Summarize a meeting": "Summarize all submissions related to oncology in the May 2025 meeting.",
+        }
+        for name, q in questions.items():
+            if st.button(q, key=q, use_container_width=True):
+                st.session_state.run_prompt = q
+
+    with st.expander("🤔 Challenging / Ambiguous Questions"):
+        questions = {
+            "Test fallback logic": "What is the price of Abaloparatide?", # Price is explicitly excluded from consumer comments
+            "Broad, multi-hop query": "Find sponsors who made submissions for both lung cancer and melanoma in 2025.",
+            "Out of scope": "What are the latest FDA guidelines?", # Tests if it hallucinates or admits it doesn't know
+        }
+        for name, q in questions.items():
+            if st.button(q, key=q, use_container_width=True):
+                st.session_state.run_prompt = q
+
 # --- Main Chat Interface ---
 st.title("Persona-Aware RAG Agent")
 st.caption(f"Currently acting as: **{selected_persona_name}**")
@@ -1148,8 +938,12 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"], unsafe_allow_html=True)
 
-# Handle user input
-if prompt := st.chat_input("Ask your question..."):
+# Handle user input from both chat box and sidebar buttons
+prompt_from_button = st.session_state.pop("run_prompt", None)
+prompt_from_input = st.chat_input("Ask your question...")
+prompt = prompt_from_button or prompt_from_input
+
+if prompt:
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
@@ -1163,54 +957,7 @@ if prompt := st.chat_input("Ask your question..."):
         else:
             st.error("Agent is not available due to an initialization error. Please check the terminal logs.")
             st.stop()
-
-
-########################################################################
-### FILE: tests/planner/test_query_classifier.py
-########################################################################
-
-"""Unit tests for QueryClassifier.
-
-Run with:
-    pytest -q tests/planner/test_query_classifier.py
-"""
-from src.planner.query_classifier import QueryClassifier, QueryMeta, Intent, Complexity
-
-
-def test_basic_classification_stub(monkeypatch):
-    """The stub Gemini client always returns the same JSON → make sure mapping works."""
-
-    qc = QueryClassifier()
-    q = "What is the PBAC outcome for belantamab mafodotin?"
-    meta: QueryMeta = qc(q)
-
-    assert isinstance(meta, QueryMeta)
-    assert meta.intent in {"factual", "comparative", "procedural", "citation", "other"}
-    assert meta.complexity in {"simple", "moderate", "complex"}
-    assert 0 <= meta.confidence_needed <= 1
-
-    # Stub response in query_classifier.GeminiClient.call_gemini → 'factual', 'simple', 0.75
-    assert meta.intent == "factual"
-    assert meta.complexity == "simple"
-    assert meta.confidence_needed == 0.75
-
-
-def test_cache(monkeypatch):
-    """Ensure LRU cache hits (no second Gemini call)."""
-
-    calls = []
-
-    def fake_call(payload):
-        calls.append(payload)
-        return {"intent": "other", "complexity": "moderate", "confidence": 0.5}
-
-    monkeypatch.setattr("src.planner.query_classifier.GeminiClient.call_gemini", fake_call)
-
-    qc = QueryClassifier(cache_size=2)
-    q = "Explain indirect costs in PBAC submissions"
-    first = qc(q)
-    second = qc(q)  # cached
-
-    assert first == second
-    # Gemini called exactly once
-    assert len(calls) == 1
+    
+    # Rerun to clear input box if a button was used
+    if prompt_from_button:
+        st.rerun()

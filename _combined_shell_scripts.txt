@@ -1,0 +1,240 @@
+========================================================================
+  Combined Shell Scripts from Git Repository: /home/mit/persona_rag_chatbot
+  Generated on: Mon 28 Jul 2025 17:22:59 AEST
+========================================================================
+
+
+
+########################################################################
+### FILE: pack_project_for_llm_v2.sh
+########################################################################
+
+#!/bin/bash
+
+# ==============================================================================
+# SCRIPT: pack_project_for_llm_v5.sh
+#
+# DESCRIPTION:
+#   A robust project packager that creates a precise, four-file context
+#   package for LLMs. It is location-independent, 100% respects .gitignore,
+#   and is resilient to discrepancies between the Git index and the filesystem.
+#
+# v5 IMPROVEMENTS:
+#   - Adds a check '[ -f ... ]' to verify a file physically exists before
+#     attempting to 'cat' it. This prevents "No such file or directory" errors
+#     if a file is deleted locally but still tracked by Git.
+# ==============================================================================
+
+# --- Helper Function to Pack Files by Category ---
+# Arguments: 1. Git Root Dir, 2. Regex pattern, 3. Output Filename, 4. Description
+pack_files_by_category() {
+    local git_root=$1
+    local pattern=$2
+    local output_filename=$3
+    local description=$4
+    local full_output_path="${git_root}/${output_filename}"
+    local file_count=0
+    local skipped_count=0
+
+    echo "📦 Packing ${description}..."
+
+    while IFS= read -r file_path; do
+        local full_source_path="${git_root}/${file_path}"
+
+        # --- NEW ROBUSTNESS CHECK ---
+        # Verify the file actually exists on the filesystem before proceeding.
+        # This handles cases where a file is deleted locally but still in the Git index.
+        if [ ! -f "$full_source_path" ]; then
+            ((skipped_count++))
+            continue # Skip to the next file in the loop
+        fi
+        
+        # Initialize file only when the first *valid* match is found
+        if [ "$file_count" -eq 0 ]; then
+            echo "========================================================================" > "$full_output_path"
+            echo "  Combined ${description} from Git Repository: ${git_root}" >> "$full_output_path"
+            echo "  Generated on: $(date)" >> "$full_output_path"
+            echo "========================================================================" >> "$full_output_path"
+        fi
+        
+        ((file_count++))
+        echo "   -> Adding: $file_path"
+        
+        echo -e "\n\n" >> "$full_output_path"
+        echo "########################################################################" >> "$full_output_path"
+        echo "### FILE: ${file_path}" >> "$full_output_path"
+        echo "########################################################################" >> "$full_output_path"
+        echo "" >> "$full_output_path"
+        cat "$full_source_path" >> "$full_output_path"
+    done < <(git -C "$git_root" ls-files | grep -E "$pattern")
+
+    if [ "$skipped_count" -gt 0 ]; then
+      echo "   🟡 Skipped $skipped_count file(s) that are tracked by Git but do not exist on disk."
+      echo "      (You may want to run 'git status' and 'git add .' to sync your repository)"
+    fi
+
+    if [ "$file_count" -eq 0 ]; then
+        echo "   🟡 No tracked and existing ${description} found."
+    else
+        echo "   ✅ Combined $file_count files into ${output_filename}"
+    fi
+}
+
+# --- Helper Function to Generate a clean, git-aware file structure list ---
+generate_file_structure() {
+    local git_root=$1
+    local output_filename=$2
+    local full_output_path="${git_root}/${output_filename}"
+    
+    echo "🌳 Generating project file structure (respecting .gitignore)..."
+    echo "========================================================================" > "$full_output_path"
+    echo "  Project File Structure for: ${git_root}" >> "$full_output_path"
+    echo "  (This list is from 'git ls-files' and is 100% accurate to the Git index)" >> "$full_output_path"
+    echo "========================================================================" >> "$full_output_path"
+    echo "" >> "$full_output_path"
+    git -C "$git_root" ls-files >> "$full_output_path"
+    echo "   ✅ Project structure saved to ${output_filename}"
+}
+
+# --- Main Execution Block ---
+main() {
+    echo "🚀 Starting LLM Project Packager v5..."
+    
+    local git_root
+    git_root=$(git rev-parse --show-toplevel 2>/dev/null)
+    if [ -z "$git_root" ]; then
+      echo "❌ Error: This script must be run from within a Git repository."
+      exit 1
+    fi
+    echo "✅ Project root identified: $git_root"
+    echo "--------------------------------------------------"
+
+    local python_output_file="_combined_python_code.txt"
+    local config_output_file="_combined_configs_and_prompts.txt"
+    local shell_output_file="_combined_shell_scripts.txt"
+    local structure_output_file="_project_structure.txt"
+
+    generate_file_structure "$git_root" "$structure_output_file"
+    pack_files_by_category "$git_root" '\.py$' "$python_output_file" "Python Files"
+    pack_files_by_category "$git_root" '(\.yaml|\.yml|\.prompt)$' "$config_output_file" "YAML & Prompt Files"
+    pack_files_by_category "$git_root" '\.sh$' "$shell_output_file" "Shell Scripts"
+
+    echo "--------------------------------------------------"
+    echo "🎉 Project packaging complete! The following files have been created in '$git_root':"
+    [ -f "${git_root}/${structure_output_file}" ] && echo "   - ${structure_output_file}"
+    [ -f "${git_root}/${python_output_file}" ] && echo "   - ${python_output_file}"
+    [ -f "${git_root}/${config_output_file}" ] && echo "   - ${config_output_file}"
+    [ -f "${git_root}/${shell_output_file}" ] && echo "   - ${shell_output_file}"
+}
+
+main
+
+
+########################################################################
+### FILE: process_json_recursively.sh
+########################################################################
+
+#!/bin/bash
+
+# ==============================================================================
+# SCRIPT: process_files_recursively_and_combine.sh (v2 - JSONL Support)
+#
+# DESCRIPTION:
+#   This script recursively finds all .json AND .jsonl files in a specified
+#   directory and its subdirectories. For each file, it does two things:
+#
+#   1. Creates an individual .txt file containing the first N lines.
+#   2. Appends the content of that new file into a single, combined .txt file.
+#
+#   This is ideal for preparing data for LLM analysis, allowing for both
+#   individual file inspection and combined contextual analysis.
+#
+# USAGE:
+#   ./process_files_recursively_and_combine.sh [path/to/your/folder]
+# ==============================================================================
+
+# --- Configuration ---
+# The number of lines (rows) to keep from the top of each file.
+LINES_TO_KEEP=1000
+
+# The directory to search. Defaults to the current directory "."
+TARGET_DIR="${1:-.}"
+
+# The name of the subdirectory where all new .txt files will be saved.
+OUTPUT_DIR="processed_txt_files"
+
+# The name for the single file that will contain all the combined text.
+# The leading underscore helps it sort to the top of the file list.
+COMBINED_FILENAME="_all_combined_content.txt"
+
+# --- Pre-flight Checks ---
+
+# Resolve the absolute path of the target directory for robust path manipulation.
+TARGET_DIR=$(realpath "$TARGET_DIR")
+
+# Check if the target directory actually exists.
+if [ ! -d "$TARGET_DIR" ]; then
+  echo "Error: Directory '$TARGET_DIR' not found."
+  exit 1
+fi
+
+# Create the output directory. The "-p" flag prevents errors if it already exists.
+mkdir -p "${TARGET_DIR}/${OUTPUT_DIR}"
+
+# Define the full path for the combined output file.
+COMBINED_OUTPUT_PATH="${TARGET_DIR}/${OUTPUT_DIR}/${COMBINED_FILENAME}"
+
+# Initialize the combined file by overwriting it with a header.
+# This ensures it's clean before the script starts appending data.
+echo "--- Combined output of all processed .json and .jsonl files. Generated on $(date) ---" > "$COMBINED_OUTPUT_PATH"
+
+echo "Recursively searching for .json and .jsonl files in: $TARGET_DIR"
+echo "Processed files will be saved in: ${TARGET_DIR}/${OUTPUT_DIR}"
+echo "--------------------------------------------------"
+
+# --- Main Processing Loop ---
+
+file_count=0
+# --- UPDATED FIND COMMAND: Uses `-o` for OR logic to find both file types ---
+find "$TARGET_DIR" -type f \( -name "*.json" -o -name "*.jsonl" \) -not -path "*/${OUTPUT_DIR}/*" | while IFS= read -r source_file; do
+  
+  ((file_count++))
+  echo "Processing: $source_file"
+
+  # --- Create the individual .txt file ---
+  relative_path="${source_file#$TARGET_DIR/}"
+  # Sanitize the name by replacing extension and slashes
+  sanitized_name="${relative_path//\//_}"
+  sanitized_name="${sanitized_name%.json}"
+  sanitized_name="${sanitized_name%.jsonl}"
+  
+  timestamp=$(date +%Y%m%d_%H%M%S_%N) # Added nanoseconds (%N) for better uniqueness
+  new_txt_filename="${sanitized_name}_${timestamp}.txt"
+  output_path="${TARGET_DIR}/${OUTPUT_DIR}/${new_txt_filename}"
+
+  # Use 'head' to take the first N lines and create the new individual .txt file.
+  head -n "$LINES_TO_KEEP" "$source_file" > "$output_path"
+  echo "  -> Saved individual file: $new_txt_filename"
+
+  # --- Append to the combined file ---
+  # Add a clear separator to the combined file to distinguish between sources.
+  echo -e "\n\n# ======================================================" >> "$COMBINED_OUTPUT_PATH"
+  echo "# START OF CONTENT FROM: ${relative_path}" >> "$COMBINED_OUTPUT_PATH"
+  echo "# ======================================================\n" >> "$COMBINED_OUTPUT_PATH"
+  
+  # Append the content of the newly created individual file to the combined file.
+  cat "$output_path" >> "$COMBINED_OUTPUT_PATH"
+  
+  echo "  -> Appended content to: $COMBINED_FILENAME"
+
+done
+
+# --- Final Report ---
+echo "--------------------------------------------------"
+if [ "$file_count" -eq 0 ]; then
+  echo "No .json or .jsonl files were found in '$TARGET_DIR' or its subdirectories."
+else
+  echo "Processing complete. Total files processed: $file_count."
+  echo "All content has also been aggregated into the master file:"
+  echo "  -> ${COMBINED_OUTPUT_PATH}"
+fi

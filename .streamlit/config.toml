@@ -1,0 +1,8 @@
+# FILE: .streamlit/config.toml
+
+[logger]
+level = "debug"
+messageFormat = "%(asctime)s - [%(levelname)s] - %(message)s"
+
+[server]
+runOnSave = true

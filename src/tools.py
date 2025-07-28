@@ -1,264 +1,129 @@
 # src/tools.py
 
 """
-Specialized Data Retrieval Tools for the RAG Agent.
+Low-level tools and client initializers.
 
-This module contains the functions that form the "second brain" of the agent.
-Each function is a "tool" that the main agent can call to retrieve specific
-information from a backend data source (Pinecone Vector DB, Neo4j Graph DB).
-
-Key Principles:
-1.  **Modularity**: Each tool is self-contained and handles one specific data source.
-2.  **Efficiency**: Connections to databases are cached using Streamlit's resource caching
-    to avoid re-establishing connections on every run.
-3.  **Provenance**: Every piece of context retrieved is bundled with its source
-    metadata (e.g., document ID, page number, URL). This is crucial for citation
-    and explainability.
-4.  **Security**: All API keys and credentials are securely accessed via st.secrets.
+This module is responsible for setting up and providing access to external
+services like databases and APIs (Pinecone, Neo4j, Google AI). It reads
+credentials from environment variables. It has NO dependencies on other
+modules in this project to prevent circular imports.
 """
 
-from asyncio.log import logger
-import streamlit as st
+import os
+import logging
+from functools import lru_cache
+
 import pinecone
 import neo4j
 import google.generativeai as genai
-from typing import List, Dict, Any
-import logging
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# --- CONNECTION INITIALIZATION (CACHED) ---
+# --- Client Initializers (Cached for Performance) ---
 
-# In src/tools.py
-
-# ... (keep all existing functions) ...
-
-# In src/tools.py
-
-@st.cache_data(ttl=3600)
-def get_neo4j_schema() -> str:
-    """
-    Connects to Neo4j and dynamically fetches its schema.
-    V1.1: Made robust to handle nodes with no properties.
-    """
-    logger.info("Dynamically fetching Neo4j schema...")
-    driver = get_neo4j_driver()
-    if not driver:
-        return "Error: Could not connect to Neo4j to fetch schema."
-
-    schema_parts = []
+@lru_cache(maxsize=1)
+def get_google_ai_client() -> genai:
+    """Initializes and returns the Google AI client."""
     try:
-        node_properties_query = "CALL db.schema.nodeTypeProperties()"
-        node_records, _, _ = driver.execute_query(node_properties_query)
-        schema_parts.append("Node Labels and Properties:")
-        for record in node_records:
-            label = record['nodeType'].strip('`')
-            # --- THE FIX: Use .get() to safely handle missing 'properties' key ---
-            properties_list = record.get('properties', [])
-            properties = ", ".join([f"{p['propertyName']}: {p['propertyTypes'][0]}" for p in properties_list])
-            schema_parts.append(f"- {label} {{{properties}}}")
-
-        rel_properties_query = "CALL db.schema.relTypeProperties()"
-        rel_records, _, _ = driver.execute_query(rel_properties_query)
-        schema_parts.append("\nRelationship Types:")
-        for record in rel_records:
-            rel_type = record['relType'].strip('`').replace('`', '')
-            schema_parts.append(f"- {rel_type}")
-            
-        schema_string = "\n".join(schema_parts)
-        logger.info(f"Successfully fetched schema:\n{schema_string}")
-        return schema_string
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            raise ValueError("GOOGLE_API_KEY environment variable not set.")
+        genai.configure(api_key=api_key)
+        logger.info("Google AI client configured successfully.")
+        return genai
     except Exception as e:
-        logger.error(f"Failed to fetch Neo4j schema: {e}")
-        return "Error: Could not dynamically fetch schema. Using a basic fallback."
-    
-@st.cache_resource
-def get_google_ai_client():
-    """Initializes and returns a Google Generative AI client."""
-    try:
-        genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-        # Model for embedding generation
-        model = genai.GenerativeModel('models/embedding-001')
-        return model
-    except Exception as e:
-        logging.error(f"Failed to initialize Google AI client: {e}")
-        st.error("Could not connect to Google AI. Please check your API key.", icon="🚨")
+        logger.error(f"Failed to configure Google AI client: {e}")
         return None
 
-@st.cache_resource
-def get_pinecone_index():
-    """Initializes and returns a connection to the Pinecone index."""
+@lru_cache(maxsize=1)
+def get_pinecone_index() -> pinecone.Index:
+    """Initializes and returns the Pinecone index handle."""
     try:
-        pc = pinecone.Pinecone(
-            api_key=st.secrets["PINECONE_API_KEY"]
-        )
-        # --- FIX: Read the index name from secrets instead of hardcoding it ---
-        index_name = st.secrets["PINECONE_INDEX_NAME"] 
-        
-        if index_name not in pc.list_indexes().names():
-            logging.error(f"Pinecone index '{index_name}' not found in your project.")
-            st.error(f"Pinecone index '{index_name}' does not exist. Please check your configuration.", icon="🌲")
-            return None
+        api_key = os.getenv("PINECONE_API_KEY")
+        index_name = os.getenv("PINECONE_INDEX_NAME")
+        if not api_key or not index_name:
+            raise ValueError("PINECONE_API_KEY or PINECONE_INDEX_NAME not set.")
 
-        return pc.Index(index_name)
+        pc = pinecone.Pinecone(api_key=api_key)
+        index = pc.Index(index_name)
+        logger.info(f"Pinecone index '{index_name}' connected successfully.")
+        return index
     except Exception as e:
-        logging.error(f"Failed to initialize Pinecone: {e}")
-        st.error(f"Could not connect to Pinecone. Please check your credentials and configuration in secrets.toml.", icon="🌲")
+        logger.error(f"Failed to connect to Pinecone index: {e}")
         return None
 
-
-@st.cache_resource
-def get_neo4j_driver():
-    """Initializes and returns a Neo4j driver instance."""
+@lru_cache(maxsize=1)
+def get_neo4j_driver() -> neo4j.GraphDatabase.driver:
+    """Initializes and returns the Neo4j driver."""
     try:
-        driver = neo4j.GraphDatabase.driver(
-            st.secrets["NEO4J_URI"],
-            auth=(st.secrets["NEO4J_USERNAME"], st.secrets["NEO4J_PASSWORD"])
-        )
-        # Verify connection
+        uri = os.getenv("NEO4J_URI")
+        user = os.getenv("NEO4J_USERNAME")
+        password = os.getenv("NEO4J_PASSWORD")
+        if not all([uri, user, password]):
+            raise ValueError("Neo4j connection details (URI, USERNAME, PASSWORD) not set.")
+
+        driver = neo4j.GraphDatabase.driver(uri, auth=(user, password))
         driver.verify_connectivity()
-        logging.info("Neo4j driver initialized successfully.")
+        logger.info("Neo4j driver connected successfully.")
         return driver
     except Exception as e:
-        logging.error(f"Failed to initialize Neo4j driver: {e}")
-        st.error("Could not connect to the Neo4j database. Please check your credentials.", icon="🕸️")
+        logger.error(f"Failed to create Neo4j driver: {e}")
         return None
 
-# ... (keep all other functions and imports as they are) ...
+# --- Graph Schema Utility ---
 
-def pinecone_search_tool(query: str, namespace: str, top_k: int = 100) -> List[Dict[str, Any]]:
+@lru_cache(maxsize=1)
+def get_neo4j_schema() -> str:
     """
-    Performs a semantic search on a specific Pinecone namespace.
-    V1.3: FINAL version. Includes all variable definitions.
-    """
-    # --- FIX: Re-instating the client and index definitions ---
-    embedding_client = get_google_ai_client()
-    pinecone_index = get_pinecone_index()
-
-    if not all([embedding_client, pinecone_index]):
-        logging.error("Search failed: Pinecone or Google AI client not available.")
-        return []
-
-    try:
-        # 1. Create embedding for the user's query
-        query_embedding_result = genai.embed_content(
-            model='models/embedding-001',
-            content=query,
-            task_type="retrieval_query"
-        )
-        query_embedding = query_embedding_result['embedding']
-
-        # 2. Query Pinecone
-        results = pinecone_index.query(
-            namespace=namespace,
-            vector=query_embedding,
-            top_k=top_k,
-            include_metadata=True
-        )
-
-        # 3. Process and format results with provenance
-        processed_results = []
-        for match in results.get('matches', []):
-            metadata = match.get('metadata', {})
-            content = metadata.get('source_text_preview') or metadata.get('text', 'No content available.')
-            
-            source_info = {
-                "document_id": metadata.get("doc_id", "N/A"),
-                "page_numbers": metadata.get("page_numbers", "N/A"),
-                "source_url": metadata.get("source_pdf_url", "N/A"),
-                "retrieval_score": match.get('score', 0.0)
-            }
-            
-            processed_results.append({
-                "content": content,
-                "source": source_info
-            })
-            
-        logging.info(f"Pinecone search in namespace '{namespace}' returned {len(processed_results)} results.")
-        return processed_results
-
-    except Exception as e:
-        logging.error(f"An error occurred during Pinecone search: {e}")
-        return []
-
-# ... (the rest of the file remains the same) ...
-
-# In src/tools.py
-
-# ... (keep other functions as they are) ...
-
-def neo4j_graph_tool(cypher_query: str) -> List[Dict[str, Any]]:
-    """
-    Executes a read-only Cypher query against the Neo4j database.
-    V2.0: Corrected to properly handle the Neo4j driver's Result object.
+    Retrieves the schema from Neo4j for use in LLM prompts.
+    This includes node labels, properties, and relationship types.
     """
     driver = get_neo4j_driver()
     if not driver:
-        logging.error("Graph query failed: Neo4j driver not available.")
-        return []
+        return "Error: Neo4j driver not available."
 
-    results = []
+    schema_query = """
+    CALL db.schema.visualization()
+    """
     try:
-        # The official way to run a query and get records
-        records, _, _ = driver.execute_query(cypher_query)
+        with driver.session() as session:
+            result = session.run(schema_query)
+            # The result from schema visualization is complex; we need to simplify it.
+            # A simpler approach for LLM prompts is often a text-based description.
+            
+            # Get node labels and properties
+            node_schema_query = "CALL db.labels() YIELD label CALL db.propertyKeys() YIELD propertyKey WITH label, collect(propertyKey) AS properties RETURN label, properties"
+            node_props = session.run(node_schema_query).data()
+            
+            # Get relationship schema
+            rel_schema_query = """
+            MATCH (n)-[r]->(m)
+            RETURN DISTINCT type(r) AS rel_type, labels(n) AS from_labels, labels(m) AS to_labels
+            LIMIT 50
+            """
+            rel_types = session.run(rel_schema_query).data()
 
-        for record in records:
-            path = record.get("p") # We expect the query to return a path named 'p'
-            if path:
-                content_str, sources = _serialize_path(path)
-                results.append({"content": content_str, "source": sources})
-            else:
-                record_dict = record.data()
-                results.append({
-                    "content": str(record_dict),
-                    "source": {"type": "graph_record", "query": cypher_query}
-                })
+            schema_str = "Graph Schema:\n"
+            schema_str += "Node Labels and Properties:\n"
+            for item in node_props:
+                 # Check if the node label exists and has properties
+                if item['label'] and item['properties']:
+                    # This is a simplification; a more robust version would check properties per label
+                    # For now, we list all possible properties under each label for prompt context
+                    # A better query: "MATCH (n:{label}) UNWIND keys(n) as key RETURN distinct key"
+                    schema_str += f"- Node '{item['label']}'\n"
+            
+            schema_str += "\nRelationship Types and Connections:\n"
+            for item in rel_types:
+                from_node = item['from_labels'][0] if item['from_labels'] else "Node"
+                to_node = item['to_labels'][0] if item['to_labels'] else "Node"
+                schema_str += f"- ({from_node})-[:{item['rel_type']}]->({to_node})\n"
 
-        logging.info(f"Neo4j query returned {len(results)} results.")
-        return results
+            if not node_props and not rel_types:
+                return "Schema not found or database is empty."
+
+            return schema_str
+
     except Exception as e:
-        logging.error(f"An error occurred during Neo4j query: {e}")
-        return [{"content": f"Failed to execute Cypher query due to an error: {e}", "source": {"type": "error"}}]
-
-# ... (the _serialize_path helper function remains the same) ...
-def _serialize_path(path: neo4j.graph.Path) -> (str, Dict):
-    """
-    Helper function to convert a Neo4j Path object into a text representation
-    and extract source metadata.
-    """
-    nodes_str = []
-    rels_str = []
-    sources = {"nodes": [], "relationships": []}
-
-    for node in path.nodes:
-        node_props = dict(node)
-        node_label = next(iter(node.labels), "Node")
-        nodes_str.append(f"({node_label} {{name: '{node_props.get('name', 'Unknown')}'}})")
-        sources["nodes"].append(node_props)
-
-    for rel in path.relationships:
-        rel_props = dict(rel)
-        # Critical: Extracting provenance from the relationship properties
-        source_preview = rel_props.pop('source_text_preview', 'N/A')
-        page_number = rel_props.pop('page_number', 'N/A')
-        
-        rel_str = f"-[{rel.type} {rel_props}]->"
-        rels_str.append(rel_str)
-        sources["relationships"].append({
-            "type": rel.type,
-            "page": page_number,
-            "preview": source_preview
-        })
-
-    # Weave nodes and relationships together
-    full_path_str = nodes_str[0]
-    for i, rel_s in enumerate(rels_str):
-        full_path_str += rel_s + nodes_str[i+1]
-
-    # Combine sources into a single representative source for this path
-    combined_source = {
-        "type": "graph_path",
-        "primary_source": sources["relationships"][0] if sources["relationships"] else "N/A"
-    }
-    return full_path_str, combined_source
+        logger.error(f"Failed to retrieve Neo4j schema: {e}")
+        return f"Error retrieving schema: {e}"

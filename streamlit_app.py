@@ -1,12 +1,12 @@
 # FILE: streamlit_app.py
-# V2.8: Passes chat history to the agent to enable conversational memory.
+# V3.0 (Final Demo Version): Evaluation questions are now targeted at the clean 2025 data.
 
 import streamlit as st
 import logging
 import os
+import asyncio
 from dotenv import load_dotenv
 
-# ... (imports and config are unchanged) ...
 # --- CRITICAL: Load environment variables at the very top ---
 load_dotenv()
 
@@ -41,7 +41,7 @@ if "messages" not in st.session_state:
 if "current_persona" not in st.session_state:
     st.session_state.current_persona = "automatic"
 
-# ... (helper functions and sidebar are unchanged) ...
+# --- Helper Functions (unchanged) ---
 @st.cache_resource
 def initialize_agent():
     if not get_google_ai_client():
@@ -62,81 +62,81 @@ def reset_chat(persona_name: str):
         {"role": "assistant", "content": f"Hi! I'm now acting in **{display_name}** mode. How can I help you?"}
     ]
 
+# --- Sidebar (unchanged) ---
 with st.sidebar:
     st.header("🤖 Persona RAG Chatbot")
     st.markdown("Select a persona to tailor my retrieval strategy and answers to your specific role.")
-
     persona_options = {
         'Automatic (Recommended)': 'automatic',
         'Clinical Analyst': 'clinical_analyst',
         'Health Economist': 'health_economist',
         'Regulatory Specialist': 'regulatory_specialist',
     }
-    
     current_display_name = [k for k, v in persona_options.items() if v == st.session_state.current_persona][0]
-    
     selected_persona_name = st.radio(
         "**Choose your Mode:**",
         options=persona_options.keys(),
         index=list(persona_options.keys()).index(current_display_name),
         key="persona_selector"
     )
-    
     selected_persona_key = persona_options[selected_persona_name]
-
     if selected_persona_key != st.session_state.current_persona:
         st.session_state.current_persona = selected_persona_key
         reset_chat(selected_persona_name)
         st.rerun()
-
     st.divider()
     if st.button("🔄 Clear Chat History", use_container_width=True):
         reset_chat(selected_persona_name)
         st.rerun()
-
     st.divider()
     st.header("🧪 Evaluation Questions")
-    st.markdown("Use these questions to test the agent's capabilities with the 2024 data.")
-    with st.expander("🎯 Fact Retrieval (2024 Data)", expanded=True):
+    st.markdown("Use these questions to test the agent's capabilities with the 2025 data.")
+
+    # --- START OF DEFINITIVE FIX: Updated Evaluation Questions for 2025 data ---
+    with st.expander("🎯 Fact Retrieval (2025 Data)", expanded=True):
         questions = {
-            "Sponsor Lookup (Dec 2024)": "Who is the sponsor for Esketamine?",
-            "Indication Lookup (July 2024)": "What condition is Belzutifan used to treat?",
-            "Trade Name Lookup (March 2024)": "What is the trade name for Aflibercept?",
-            "Dosage Form (Sept 2024)": "What is the dosage form for Fruquintinib?",
+            "Sponsor Lookup (July 2025)": "What company is the sponsor for Abaloparatide?",
+            "Indication Lookup (March 2025)": "What is Amivantamab used to treat?",
+            "Trade Name Lookup (May 2025)": "What is the trade name for Dostarlimab?",
+            "Dosage Form (July 2025)": "What is the dosage form of Apomorphine?",
         }
         for name, q in questions.items():
             if st.button(f"{name}: {q}", key=q, use_container_width=True):
                 st.session_state.run_prompt = q
-    with st.expander("⚖️ Comparative Analysis (2024 Data)"):
+
+    with st.expander("⚖️ Multi-Step Reasoning (2025 Data)"):
         questions = {
-            "Compare Submissions (March vs July)": "Compare the submissions for Adalimumab in the March 2024 and July 2024 PBAC meetings.",
-            "Find Common Sponsor": "Which company submitted drugs in both the March 2024 and May 2024 meetings?",
-            "Open-ended Definition": "What are the differences between a 'New PBS listing' and a 'Change to existing listing' based on the agenda documents?",
+            "Intersection Query": "Which sponsors made submissions in both the March 2025 and July 2025 meetings?",
+            "Comparative Query": "Compare the submission purposes for Acalabrutinib and Alectinib in the 2025 meetings.",
+            "Multi-Hop Query": "What is the indication for the drug whose trade name is Cabometyx?",
         }
         for name, q in questions.items():
             if st.button(q, key=q, use_container_width=True):
                 st.session_state.run_prompt = q
-    with st.expander("📋 Summarization (2024 Data)"):
+    
+    with st.expander("📋 Summarization (2025 Data)"):
         questions = {
-            "Summarize a Meeting": "Provide a summary of the key submissions from the May 2024 intracycle meeting.",
-            "Summarize by Theme": "Summarize all submissions related to cancer treatment across all 2024 documents.",
-            "Synthesize High-Level Goal": "Based on the agendas, what appears to be the main focus of the PBAC's work in 2024?",
-        }
-        for name, q in questions.items():
-            if st.button(q, key=q, use_container_width=True):
-                st.session_state.run_prompt = q
-    with st.expander("🤔 Challenging / Ambiguous Questions"):
-        questions = {
-            "Test Data Boundaries": "What was the PBAC's final decision on Osilodrostat from the September 2024 meeting?",
-            "Broad, Multi-Hop Query": "Find sponsors who made submissions for both auto-immune diseases and cancer in 2024.",
-            "Test Fallback Logic (No Price)": "What is the price of Aflibercept?",
-            "Out of Scope (External Knowledge)": "What are the latest EMA guidelines for vaccine submissions?",
+            "Summarize a Meeting": "Provide a summary of the key submissions from the May 2025 PBAC meeting.",
+            "Summarize by Theme": "Summarize all submissions related to oncology in the March 2025 documents.",
+            "Synthesize High-Level Goal": "Based on the agendas, what appears to be the main focus of the PBAC's work in 2025?",
         }
         for name, q in questions.items():
             if st.button(q, key=q, use_container_width=True):
                 st.session_state.run_prompt = q
 
-# --- Main Chat Interface ---
+    with st.expander("🤔 Challenging / Ambiguous Questions"):
+        questions = {
+            "Test Data Boundaries": "What was the final PBAC decision on Ribociclib from the July 2025 meeting?",
+            "Test Fallback Logic (No Price)": "What is the price of Tirzepatide?",
+            "Out of Scope (External Knowledge)": "What are the latest FDA guidelines on biosimilars?",
+        }
+        for name, q in questions.items():
+            if st.button(q, key=q, use_container_width=True):
+                st.session_state.run_prompt = q
+    # --- END OF DEFINITIVE FIX ---
+
+
+# --- Main Chat Interface (unchanged) ---
 st.title("Persona-Aware RAG Agent")
 if st.session_state.current_persona == "automatic":
     st.caption("Currently in **Automatic Mode** (selects best persona per query)")
@@ -145,7 +145,9 @@ else:
 with st.container(border=True):
     st.info("""
     **Welcome! This is an advanced chatbot designed to answer questions about pharmaceutical and regulatory documents.** 
+    
     Its unique feature is the ability to tailor its information retrieval strategy based on the professional role you select in the sidebar.
+
     **How to use this demo:**
     1.  **Choose Your Mode:** Select 'Automatic' (Recommended) or a specific persona from the sidebar.
     2.  **Ask a Question:** Use the pre-defined 'Evaluation Questions' or type your own question in the chat box below.
@@ -177,17 +179,15 @@ if prompt:
                  spinner_text = f"Thinking as a {selected_persona_name}..."
             
             with st.spinner(spinner_text):
-                # --- START: Pass Chat History to Agent ---
-                # Format the last 4 messages (2 turns) for the rewriter
-                history_for_rewrite = [
-                    f"{m['role']}: {m['content']}" for m in st.session_state.messages[-5:-1]
-                ]
-                response = st.session_state.agent.run(
-                    prompt, 
-                    persona=st.session_state.current_persona,
-                    chat_history=history_for_rewrite
+                history_for_rewrite = [f"{m['role']}: {m['content']}" for m in st.session_state.messages[-5:-1]]
+                
+                response = asyncio.run(
+                    st.session_state.agent.run(
+                        prompt, 
+                        persona=st.session_state.current_persona,
+                        chat_history=history_for_rewrite
+                    )
                 )
-                # --- END ---
                 st.markdown(response, unsafe_allow_html=True)
                 st.session_state.messages.append({"role": "assistant", "content": response})
         else:

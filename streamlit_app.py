@@ -178,7 +178,7 @@ if prompt:
                 history_for_rewrite = [f"{m['role']}: {m['content']}" for m in st.session_state.messages[-5:-1]]
                 
                 # --- START OF DEFINITIVE FIX ---
-                # REMOVED asyncio.run() as agent.run is a synchronous function.
+                # REMOVED asyncio.run() as agent.run is now a synchronous function.
                 # This was the cause of the ValueError crash.
                 response = st.session_state.agent.run(
                     prompt, 

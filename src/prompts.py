@@ -6,18 +6,15 @@ Production-grade prompts for a robust RAG agent. This version supports both
 direct RAG and a multi-step ReAct (Reason+Act) style reasoning loop.
 """
 
-QUERY_CLASSIFICATION_PROMPT = """
-You are an expert query analysis agent. Your task is to analyze the user's question and provide a structured JSON output with three fields: 'intent', 'keywords', and 'question_is_graph_suitable'.
+# ... (other prompts remain the same) ...
 
-1.  **'intent'**: Classify the user's goal into one of these categories:
-    *   "specific_fact_lookup": For questions seeking a single, direct answer (e.g., "What company sponsors Drug X?").
-    *   "simple_summary": For questions asking for a general overview (e.g., "Tell me about Drug Y.").
-    *   "comparative_analysis": For questions that compare two or more items (e.g., "Compare Drug A and Drug B.").
-    *   "general_qa": For all other questions.
+QUERY_CLASSIFICATION_PROMPT_V2 = """
+You are an expert query analysis agent. Your task is to analyze the user's question and provide a structured JSON output with four fields: 'intent', 'keywords', 'themes', and 'question_is_graph_suitable'.
 
-2.  **'keywords'**: Extract the most important nouns and proper nouns from the question, such as drug names, company names, or medical conditions. Return them as a list of strings.
-
-3.  **'question_is_graph_suitable'**: Return `true` if the question involves relationships between entities (e.g., drug-to-sponsor, drug-to-condition), which are suitable for a knowledge graph. Otherwise, return `false`.
+1.  **'intent'**: Classify the user's goal (e.g., "specific_fact_lookup", "simple_summary").
+2.  **'keywords'**: Extract key nouns like drug names, company names, etc.
+3.  **'themes'**: Extract any high-level conceptual themes from the question. If the user asks about "cancer drugs" or "drugs for lung cancer", a good theme would be "Oncology". If they ask about cost, a good theme is "Pharmacoeconomic Analysis". Choose from this list: ["Oncology", "Regulatory History", "Efficacy Results", "Safety Results", "Clinical Trial Design", "Pharmacoeconomic Analysis", "Dosage and Administration", "Drug/Therapy Description", "Indication/Population Description"]. Return an empty list if no theme applies.
+4.  **'question_is_graph_suitable'**: Return `true` if the question involves relationships between entities.
 
 Output ONLY the raw JSON object. Do not add explanations or markdown formatting.
 """

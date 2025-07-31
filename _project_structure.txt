@@ -10,6 +10,7 @@ _combined_python_code.txt
 _combined_shell_scripts.txt
 _project_structure.txt
 clear_cache.sh
+config/models.yml
 config/persona_tool_map.yml
 pack_project_for_llm_v2.sh
 process_json_recursively.sh

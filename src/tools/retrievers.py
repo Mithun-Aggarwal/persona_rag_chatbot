@@ -91,18 +91,34 @@ def _serialize_neo4j_path(record: Dict[str, Any]) -> str:
         logger.error(f"Failed to serialize Neo4j record due to parsing error: {e}", exc_info=True)
         return ""
 
-def _vector_search_tool(query: str, namespace: str, tool_name: str, top_k: int = 7) -> ToolResult:
+def _vector_search_tool(query: str, namespace: str, tool_name: str, query_meta: QueryMetadata, top_k: int = 7) -> ToolResult:
     with Timer(f"Tool: {tool_name}"):
         pinecone_index = get_pinecone_index()
-        if not pinecone_index or not genai:
-            return ToolResult(tool_name=tool_name, success=False, content="Vector search client not available.")
+        if not pinecone_index or not genai: return ToolResult(tool_name=tool_name, success=False, content="...")
+        
+        # --- DEFINITIVE FIX: Build metadata filter ---
+        metadata_filter = {}
+        if query_meta and query_meta.themes:
+            # Note: The field name 'semantic_purpose' must match what's in your Pinecone metadata.
+            metadata_filter["semantic_purpose"] = {"$in": query_meta.themes}
+            logger.info(f"Applying metadata filter to Pinecone search: {metadata_filter}")
+
         try:
             with Timer("Embedding Generation"):
+                # We can also enrich the query content here if needed, but for now, focus on filtering.
                 query_embedding = genai.embed_content(model='models/text-embedding-004', content=query, task_type="retrieval_query")
+            
             with Timer("Pinecone Query"):
-                response = pinecone_index.query(namespace=namespace, vector=query_embedding['embedding'], top_k=top_k, include_metadata=True)
-            if not response.get('matches'):
-                return ToolResult(tool_name=tool_name, success=True, content="")
+                # Pass the filter to the query method.
+                response = pinecone_index.query(
+                    namespace=namespace, 
+                    vector=query_embedding['embedding'], 
+                    top_k=top_k, 
+                    include_metadata=True,
+                    filter=metadata_filter if metadata_filter else None # Pass filter only if it's not empty
+                )
+
+            if not response.get('matches'): return ToolResult(tool_name=tool_name, success=True, content="")
             content_list = _format_pinecone_results(response['matches'])
             return ToolResult(tool_name=tool_name, success=True, content="\n---\n".join(content_list))
         except Exception as e:
@@ -110,13 +126,13 @@ def _vector_search_tool(query: str, namespace: str, tool_name: str, top_k: int =
             return ToolResult(tool_name=tool_name, success=False, content=f"An error occurred: {e}")
 
 def retrieve_clinical_data(query: str, query_meta: QueryMetadata) -> ToolResult:
-    return _vector_search_tool(query, "pbac-clinical", "retrieve_clinical_data")
+    return _vector_search_tool(query, "pbac-clinical", "retrieve_clinical_data", query_meta)
 
 def retrieve_summary_data(query: str, query_meta: QueryMetadata) -> ToolResult:
-    return _vector_search_tool(query, "pbac-summary", "retrieve_summary_data")
+    return _vector_search_tool(query, "pbac-summary", "retrieve_summary_data", query_meta)
 
 def retrieve_general_text(query: str, query_meta: QueryMetadata) -> ToolResult:
-    return _vector_search_tool(query, "pbac-text", "retrieve_general_text")
+    return _vector_search_tool(query, "pbac-text", "retrieve_general_text", query_meta)
 
 def query_knowledge_graph(query: str, query_meta: QueryMetadata) -> ToolResult:
     with Timer("Tool: query_knowledge_graph"):

@@ -1,6 +1,14 @@
-# config/models.yml
+# FILE: config/models.yml
+# V2.0: Added Cohere re-ranker model configuration
+
 models:
   synthesis_pro: 'gemini-1.5-pro-latest'
   synthesis_flash: 'gemini-1.5-flash-latest'
   classification: 'gemini-1.5-flash-latest'
   embedding: 'models/text-embedding-004'
+
+# --- NEW: Re-ranker Configuration ---
+reranker:
+  # We will use Cohere's powerful re-rank model.
+  # Ensure you have a COHERE_API_KEY in your .env file.
+  model_name: "rerank-english-v3.0"

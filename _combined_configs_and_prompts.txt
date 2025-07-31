@@ -1,8 +1,20 @@
 ========================================================================
   Combined YAML & Prompt Files from Git Repository: /home/mit/persona_rag_chatbot
-  Generated on: Wed 30 Jul 2025 17:47:43 AEST
+  Generated on: Thu 31 Jul 2025 20:38:28 AEST
 ========================================================================
 
+
+
+########################################################################
+### FILE: config/models.yml
+########################################################################
+
+# config/models.yml
+models:
+  synthesis_pro: 'gemini-1.5-pro-latest'
+  synthesis_flash: 'gemini-1.5-flash-latest'
+  classification: 'gemini-1.5-flash-latest'
+  embedding: 'models/text-embedding-004'
 
 
 ########################################################################

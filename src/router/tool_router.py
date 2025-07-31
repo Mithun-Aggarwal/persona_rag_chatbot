@@ -1,5 +1,5 @@
 # FILE: src/router/tool_router.py
-# V4.1 (Definitive Fix): Added the missing `return` statement to the success path.
+# V5.0 (Unified Tooling): Refactored to use only the two primary tools.
 
 import logging
 from typing import Callable, Dict
@@ -11,10 +11,9 @@ logger = logging.getLogger(__name__)
 
 class ToolRouter:
     def __init__(self):
+        # --- DEFINITIVE FIX: Register only the tools that now exist ---
         self.registry: Dict[str, Callable[[str, QueryMetadata], ToolResult]] = {
-            "retrieve_clinical_data": retrievers.retrieve_clinical_data,
-            "retrieve_summary_data": retrievers.retrieve_summary_data,
-            "retrieve_general_text": retrievers.retrieve_general_text,
+            "vector_search": retrievers.vector_search,
             "query_knowledge_graph": retrievers.query_knowledge_graph,
         }
         logger.info(f"ToolRouter initialized with {len(self.registry)} tools.")
@@ -26,11 +25,7 @@ class ToolRouter:
             logger.warning(f"Tool '{tool_name}' not found in registry.")
             return ToolResult(tool_name=tool_name, success=False, content="[Error: Tool not implemented]")
         try:
-            # --- START OF DEFINITIVE FIX ---
-            # The previous version was missing this `return` statement.
-            # This caused all successful tool runs to return `None` to the agent.
             return tool_function(query, query_meta)
-            # --- END OF DEFINITIVE FIX ---
         except Exception as e:
             logger.error(f"[ToolRouter] Tool '{tool_name}' failed: {e}", exc_info=True)
             return ToolResult(tool_name=tool_name, success=False, content=f"An error occurred: {e}")

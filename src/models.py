@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Literal
 
 
@@ -15,6 +15,7 @@ class QueryMetadata(BaseModel):
     intent: QueryIntent
     keywords: List[str]
     question_is_graph_suitable: bool
+    themes: Optional[List[str]] = Field(default_factory=list, description="High-level themes for metadata filtering.")
 
 
 class ToolPlanItem(BaseModel):

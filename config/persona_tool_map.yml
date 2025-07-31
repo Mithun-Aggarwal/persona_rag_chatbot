@@ -1,37 +1,33 @@
 # FILE: config/persona_tool_map.yml
-# V2.0: Defines the preferred tool strategy for different user personas.
-# This map links a persona to the tools they should use and provides a weight
-# to help the ToolPlanner prioritize. A higher weight indicates a stronger preference.
+# V3.0 (Unified Tooling): Refactored to use a single vector search tool with persona-driven metadata hints.
 
 clinical_analyst:
-  - tool_name: "retrieve_clinical_data"  # Tool hitting the 'pbac-clinical' namespace
+  - tool_name: "vector_search"
     weight: 1.0
-  - tool_name: "query_knowledge_graph"    # Tool for structured facts
+    # Hint: Prioritize chunks marked with these semantic purposes
+    metadata_hints:
+      semantic_purpose: ["Efficacy Results", "Safety Results", "Clinical Trial Design", "Indication/Population Description"]
+  - tool_name: "query_knowledge_graph"
     weight: 0.9
-  - tool_name: "retrieve_general_text"    # Tool hitting 'pbac-text'
-    weight: 0.6
 
 health_economist:
-  - tool_name: "retrieve_summary_data"    # Tool for 'pbac-summary' (costs, tables)
+  - tool_name: "vector_search"
     weight: 1.0
-  - tool_name: "query_knowledge_graph"
-    weight: 0.8
-  - tool_name: "retrieve_general_text"
-    weight: 0.4
-
-regulatory_specialist:
-  - tool_name: "retrieve_general_text"
-    weight: 1.0
-  - tool_name: "query_knowledge_graph"
-    weight: 0.9
-  - tool_name: "retrieve_summary_data"
-    weight: 0.8
-
-# A default user gets a balanced search across the primary data stores.
-default:
-  - tool_name: "retrieve_general_text"
-    weight: 1.0
-  - tool_name: "retrieve_summary_data"
-    weight: 0.9
+    metadata_hints:
+      semantic_purpose: ["Pharmacoeconomic Analysis", "Drug/Therapy Description"]
   - tool_name: "query_knowledge_graph"
     weight: 0.7
+
+regulatory_specialist:
+  - tool_name: "vector_search"
+    weight: 1.0
+    metadata_hints:
+      semantic_purpose: ["Regulatory History", "Background/Context", "Dosage and Administration"]
+  - tool_name: "query_knowledge_graph"
+    weight: 0.9
+
+default:
+  - tool_name: "vector_search"
+    weight: 1.0
+  - tool_name: "query_knowledge_graph"
+    weight: 0.8

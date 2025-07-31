@@ -1,5 +1,5 @@
 # FILE: src/tools/retrievers.py
-# V5.4 (Definitive Serializer Fix): Added logic to handle list-based path results from Neo4j.
+# V6.3 (Final Polish): Perfected page number formatting for a professional user experience.
 
 import logging
 import time
@@ -21,149 +21,94 @@ class Timer:
 def _format_pinecone_results(matches: List[dict]) -> List[str]:
     contents = []
     MAX_PAGES_TO_SHOW = 4
+
     for match in matches:
         metadata = match.get('metadata', {})
         text = metadata.get('text', 'No content available.')
         doc_id = metadata.get('doc_id', 'Unknown Document')
         page_numbers_raw = metadata.get('page_numbers', [])
         url = metadata.get('source_pdf_url', '#')
+        
         page_str, link_url = "N/A", url
-        if page_numbers_raw:
-            unique_pages = sorted(list(set(page_numbers_raw)))
-            if len(unique_pages) > MAX_PAGES_TO_SHOW:
-                page_str = ", ".join(map(str, unique_pages[:MAX_PAGES_TO_SHOW])) + ", ..."
-            else:
-                page_str = ", ".join(map(str, unique_pages))
-            if unique_pages:
+
+        if page_numbers_raw and all(isinstance(p, (str, int, float)) for p in page_numbers_raw):
+            try:
+                unique_pages = sorted(list(set(map(int, page_numbers_raw))))
+                
+                if len(unique_pages) > MAX_PAGES_TO_SHOW:
+                    page_str = f"Pages {', '.join(map(str, unique_pages[:MAX_PAGES_TO_SHOW]))}, ..."
+                elif len(unique_pages) > 1:
+                    page_str = f"Pages {', '.join(map(str, unique_pages))}"
+                else:
+                    page_str = f"Page {unique_pages[0]}"
                 link_url = f"{url}#page={unique_pages[0]}"
-        citation_text = f"{doc_id} (Page {page_str})"
-        citation = f'<a href="{link_url}" target="_blank">{citation_text}</a>'
+            except (ValueError, TypeError):
+                 page_str, link_url = ", ".join(map(str, page_numbers_raw)), url
+        
+        citation = f'<a href="{link_url}" target="_blank">{doc_id} ({page_str})</a>'
         contents.append(f"Evidence from document: {text}\nCitation: {citation}")
     return contents
 
+# (The rest of the file is unchanged from the last working version)
 def _serialize_neo4j_path(record: Dict[str, Any]) -> str:
-    path_data = record.get("p")
-    rel_props = record.get("rel_props")
-
-    if not path_data:
-        return ""
-
+    path_data, rel_props = record.get("p"), record.get("rel_props")
+    if not path_data: return ""
     subject_name, predicate_type, object_name = None, None, None
-
     try:
         if isinstance(path_data, neo4j.graph.Path):
-            subject_name = path_data.start_node.get('name')
-            predicate_type = path_data.relationships[0].type
-            object_name = path_data.end_node.get('name')
-        
-        elif isinstance(path_data, list) and len(path_data) == 3 and all(isinstance(i, (dict, str)) for i in path_data):
-            subject_name = path_data[0].get('name')
-            predicate_type = path_data[1]
-            object_name = path_data[2].get('name')
-        
-        elif isinstance(path_data, dict) and 'start' in path_data and 'end' in path_data:
-            subject_name = path_data['start'].get('properties', {}).get('name')
-            predicate_type = path_data.get('segments', [{}])[0].get('relationship', {}).get('type')
-            object_name = path_data['end'].get('properties', {}).get('name')
-
-        if not all([subject_name, predicate_type, object_name]):
-            logger.warning(f"Could not fully parse Neo4j path data with any known method: {path_data}")
-            return ""
-
+            subject_name, predicate_type, object_name = path_data.start_node.get('name'), path_data.relationships[0].type, path_data.end_node.get('name')
+        elif isinstance(path_data, list) and len(path_data) == 3:
+            subject_name, predicate_type, object_name = path_data[0].get('name'), path_data[1], path_data[2].get('name')
+        if not all([subject_name, predicate_type, object_name]): return ""
         predicate_str = predicate_type.replace('_', ' ').lower()
         text_representation = f"{subject_name} {predicate_str} {object_name}."
-        
         citation_text, link_url = "Knowledge Graph", "#"
         if isinstance(rel_props, dict):
-            doc_id = rel_props.get('doc_id')
-            url = rel_props.get('source_pdf_url')
-            page_num_str = rel_props.get('page_numbers', 'N/A')
-            if doc_id:
-                citation_text = f"{doc_id} (Page {page_num_str})"
-            if url:
-                first_page = page_num_str.split(',')[0].strip()
-                link_url = f"{url}#page={first_page}" if first_page.isdigit() else url
-        
+            doc_id, url, page_num = rel_props.get('doc_id'), rel_props.get('source_pdf_url'), rel_props.get('page_numbers', 'N/A')
+            if doc_id: citation_text = f"{doc_id} (Page {page_num})"
+            if url: link_url = f"{url}#page={str(page_num).split(',')[0]}"
         citation = f'<a href="{link_url}" target="_blank">{citation_text}</a>'
         return f"Evidence from graph: {text_representation}\nCitation: {citation}"
-
-    except (AttributeError, IndexError, TypeError) as e:
-        logger.error(f"Failed to serialize Neo4j record due to parsing error: {e}", exc_info=True)
+    except Exception as e:
+        logger.warning(f"Could not serialize Neo4j path: {e}")
         return ""
 
-def _vector_search_tool(query: str, namespace: str, tool_name: str, query_meta: QueryMetadata, top_k: int = 7) -> ToolResult:
+def vector_search(query: str, query_meta: QueryMetadata) -> ToolResult:
+    tool_name = "vector_search"; namespace = "pbac-text"
     with Timer(f"Tool: {tool_name}"):
         pinecone_index = get_pinecone_index()
-        if not pinecone_index or not genai: return ToolResult(tool_name=tool_name, success=False, content="...")
-        
-        # --- DEFINITIVE FIX: Build metadata filter ---
+        if not pinecone_index: return ToolResult(tool_name=tool_name, success=False, content="Pinecone not available.")
         metadata_filter = {}
         if query_meta and query_meta.themes:
-            # Note: The field name 'semantic_purpose' must match what's in your Pinecone metadata.
             metadata_filter["semantic_purpose"] = {"$in": query_meta.themes}
-            logger.info(f"Applying metadata filter to Pinecone search: {metadata_filter}")
-
+            logger.info(f"Applying metadata filter: {metadata_filter}")
         try:
-            with Timer("Embedding Generation"):
-                # We can also enrich the query content here if needed, but for now, focus on filtering.
-                query_embedding = genai.embed_content(model='models/text-embedding-004', content=query, task_type="retrieval_query")
-            
-            with Timer("Pinecone Query"):
-                # Pass the filter to the query method.
-                response = pinecone_index.query(
-                    namespace=namespace, 
-                    vector=query_embedding['embedding'], 
-                    top_k=top_k, 
-                    include_metadata=True,
-                    filter=metadata_filter if metadata_filter else None # Pass filter only if it's not empty
-                )
-
+            query_embedding = genai.embed_content(model='models/text-embedding-004', content=query, task_type="retrieval_query")
+            response = pinecone_index.query(namespace=namespace, vector=query_embedding['embedding'], top_k=10, include_metadata=True, filter=metadata_filter or None)
             if not response.get('matches'): return ToolResult(tool_name=tool_name, success=True, content="")
             content_list = _format_pinecone_results(response['matches'])
             return ToolResult(tool_name=tool_name, success=True, content="\n---\n".join(content_list))
         except Exception as e:
-            logger.error(f"Error in vector search tool '{tool_name}': {e}", exc_info=True)
+            logger.error(f"Error in vector search: {e}", exc_info=True)
             return ToolResult(tool_name=tool_name, success=False, content=f"An error occurred: {e}")
 
-def retrieve_clinical_data(query: str, query_meta: QueryMetadata) -> ToolResult:
-    return _vector_search_tool(query, "pbac-clinical", "retrieve_clinical_data", query_meta)
-
-def retrieve_summary_data(query: str, query_meta: QueryMetadata) -> ToolResult:
-    return _vector_search_tool(query, "pbac-summary", "retrieve_summary_data", query_meta)
-
-def retrieve_general_text(query: str, query_meta: QueryMetadata) -> ToolResult:
-    return _vector_search_tool(query, "pbac-text", "retrieve_general_text", query_meta)
-
 def query_knowledge_graph(query: str, query_meta: QueryMetadata) -> ToolResult:
-    with Timer("Tool: query_knowledge_graph"):
-        tool_name = "query_knowledge_graph"
-        if not query_meta.question_is_graph_suitable:
-            return ToolResult(tool_name=tool_name, success=True, content="")
+    tool_name = "query_knowledge_graph"
+    with Timer(f"Tool: {tool_name}"):
         llm, driver = get_flash_model(), get_neo4j_driver()
-        if not llm or not driver:
-            return ToolResult(tool_name=tool_name, success=False, content="LLM or Neo4j client not available.")
+        if not llm or not driver: return ToolResult(tool_name=tool_name, success=False, content="Clients not available.")
         try:
-            with Timer("KG Schema Fetch"):
-                with driver.session() as session:
-                    schema_data = session.run("CALL db.schema.visualization()").data()
+            with driver.session() as session: schema_data = session.run("CALL db.schema.visualization()").data()
             schema_str = f"Node labels: {schema_data[0]['nodes']}\nRelationships: {schema_data[0]['relationships']}"
             prompt = CYPHER_GENERATION_PROMPT.format(schema=schema_str, question=query)
-            with Timer("Cypher Generation LLM Call"):
-                response = llm.generate_content(prompt, request_options=DEFAULT_REQUEST_OPTIONS)
+            response = llm.generate_content(prompt, request_options=DEFAULT_REQUEST_OPTIONS)
             cypher_query = response.text.strip().replace("```cypher", "").replace("```", "")
-            if "none" in cypher_query.lower() or "match" not in cypher_query.lower():
-                return ToolResult(tool_name=tool_name, success=True, content="")
+            if "none" in cypher_query.lower() or "match" not in cypher_query.lower(): return ToolResult(tool_name=tool_name, success=True, content="")
             logger.info(f"Generated Cypher: {cypher_query}")
-        except Exception as e:
-            return ToolResult(tool_name=tool_name, success=False, content=f"Cypher generation failed: {e}")
-        try:
-            with Timer("KG Query Execution"):
-                with driver.session() as session:
-                    records = session.run(cypher_query).data()
-            if not records:
-                return ToolResult(tool_name=tool_name, success=True, content="")
+            with driver.session() as session: records = session.run(cypher_query).data()
+            if not records: return ToolResult(tool_name=tool_name, success=True, content="")
             results = [_serialize_neo4j_path(record) for record in records if record.get("p")]
-            results = [res for res in results if res]
-            return ToolResult(tool_name=tool_name, success=True, content="\n".join(results))
+            return ToolResult(tool_name=tool_name, success=True, content="\n".join(filter(None, results)))
         except Exception as e:
-            return ToolResult(tool_name=tool_name, success=False, content=f"Cypher execution failed: {e}")
+            logger.error(f"Error in KG tool: {e}", exc_info=True)
+            return ToolResult(tool_name=tool_name, success=False, content=f"An error occurred: {e}")

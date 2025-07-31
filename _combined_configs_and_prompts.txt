@@ -1,6 +1,6 @@
 ========================================================================
   Combined YAML & Prompt Files from Git Repository: /home/mit/persona_rag_chatbot
-  Generated on: Thu 31 Jul 2025 20:38:28 AEST
+  Generated on: Thu 31 Jul 2025 22:00:06 AEST
 ========================================================================
 
 
@@ -9,12 +9,20 @@
 ### FILE: config/models.yml
 ########################################################################
 
-# config/models.yml
+# FILE: config/models.yml
+# V2.0: Added Cohere re-ranker model configuration
+
 models:
   synthesis_pro: 'gemini-1.5-pro-latest'
   synthesis_flash: 'gemini-1.5-flash-latest'
   classification: 'gemini-1.5-flash-latest'
   embedding: 'models/text-embedding-004'
+
+# --- NEW: Re-ranker Configuration ---
+reranker:
+  # We will use Cohere's powerful re-rank model.
+  # Ensure you have a COHERE_API_KEY in your .env file.
+  model_name: "rerank-english-v3.0"
 
 
 ########################################################################

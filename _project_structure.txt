@@ -17,6 +17,7 @@ process_json_recursively.sh
 requirements.txt
 src/__init__.py
 src/agent.py
+src/common/utils.py
 src/fallback.py
 src/models.py
 src/planner/__init__.py

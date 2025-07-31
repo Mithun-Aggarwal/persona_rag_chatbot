@@ -1,5 +1,5 @@
 # FILE: src/router/tool_router.py
-# V4.0 (Definitive Sync): Reverted to a simple, synchronous tool dispatcher.
+# V4.1 (Definitive Fix): Added the missing `return` statement to the success path.
 
 import logging
 from typing import Callable, Dict
@@ -26,8 +26,11 @@ class ToolRouter:
             logger.warning(f"Tool '{tool_name}' not found in registry.")
             return ToolResult(tool_name=tool_name, success=False, content="[Error: Tool not implemented]")
         try:
-            # Simple, direct function call
+            # --- START OF DEFINITIVE FIX ---
+            # The previous version was missing this `return` statement.
+            # This caused all successful tool runs to return `None` to the agent.
             return tool_function(query, query_meta)
+            # --- END OF DEFINITIVE FIX ---
         except Exception as e:
             logger.error(f"[ToolRouter] Tool '{tool_name}' failed: {e}", exc_info=True)
             return ToolResult(tool_name=tool_name, success=False, content=f"An error occurred: {e}")

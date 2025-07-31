@@ -19,7 +19,9 @@ src/agent.py
 src/fallback.py
 src/models.py
 src/planner/__init__.py
+src/planner/persona_classifier.py
 src/planner/query_classifier.py
+src/planner/query_rewriter.py
 src/planner/tool_planner.py
 src/prompts.py
 src/router/__init__.py

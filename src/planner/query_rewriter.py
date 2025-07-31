@@ -1,11 +1,17 @@
 # FILE: src/planner/query_rewriter.py
-# NEW MODULE: Implements conversational memory by rewriting user queries.
+# V2.0 (Performance Fix): Added a heuristic check to bypass the LLM call for non-conversational queries.
 
 import logging
 from typing import List
-from src.tools.clients import get_google_ai_client
+# --- DEFINITIVE FIX: Import the config and model getter ---
+from src.tools.clients import get_flash_model, DEFAULT_REQUEST_OPTIONS
 
 logger = logging.getLogger(__name__)
+
+# --- DEFINITIVE FIX: Heuristic pre-flight check ---
+# A list of common words that indicate a query is conversational and likely needs context from chat history.
+# We check for these words (as whole words, case-insensitively) before making a slow API call.
+CONVERSATIONAL_TRIGGERS = {"it", "its", "they", "them", "that", "those", "this", "these"}
 
 REWRITE_PROMPT = """
 You are an expert query analyst. Your task is to rewrite a user's latest question into a standalone question that can be understood without the context of the chat history.
@@ -39,24 +45,31 @@ You are an expert query analyst. Your task is to rewrite a user's latest questio
 
 class QueryRewriter:
     def __init__(self):
-        genai_client = get_google_ai_client()
-        if genai_client:
-            self.llm = genai_client.GenerativeModel('gemini-1.5-flash-latest')
-        else:
-            self.llm = None
+        # --- DEFINITIVE FIX: Use the new centralized model getter ---
+        self.llm = get_flash_model()
+        if not self.llm:
             logger.error("FATAL: Gemini client not initialized, QueryRewriter will not work.")
 
     def rewrite(self, query: str, chat_history: List[str]) -> str:
-        """Rewrites a conversational query into a standalone query."""
+        """Rewrites a conversational query into a standalone query, with a performance-enhancing pre-check."""
         if not self.llm or not chat_history:
             return query # If no history or no LLM, cannot rewrite.
 
+        # --- DEFINITIVE FIX: Performance optimization ---
+        # Check if the query contains any conversational trigger words.
+        # This avoids a slow network call for the majority of queries which are already standalone.
+        query_words = set(query.lower().split())
+        if not CONVERSATIONAL_TRIGGERS.intersection(query_words):
+            logger.info(f"Query deemed standalone. Bypassing LLM rewrite. Query: '{query}'")
+            return query
+        # --- End of performance optimization ---
+
         try:
-            # Format the history for the prompt
             formatted_history = "\n  - ".join(chat_history)
             prompt = REWRITE_PROMPT.format(chat_history=formatted_history, question=query)
             
-            response = self.llm.generate_content(prompt)
+            # --- DEFINITIVE FIX: Add request_options to the call ---
+            response = self.llm.generate_content(prompt, request_options=DEFAULT_REQUEST_OPTIONS)
             rewritten_query = response.text.strip()
             
             if rewritten_query:

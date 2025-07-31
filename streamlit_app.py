@@ -1,10 +1,9 @@
 # FILE: streamlit_app.py
-# V3.0 (Final Demo Version): Evaluation questions are now targeted at the clean 2025 data.
+# V3.1 (Definitive Fix): Corrected the agent call to be synchronous, fixing the asyncio ValueError.
 
 import streamlit as st
 import logging
 import os
-import asyncio
 from dotenv import load_dotenv
 
 # --- CRITICAL: Load environment variables at the very top ---
@@ -92,7 +91,6 @@ with st.sidebar:
     st.header("🧪 Evaluation Questions")
     st.markdown("Use these questions to test the agent's capabilities with the 2025 data.")
 
-    # --- START OF DEFINITIVE FIX: Updated Evaluation Questions for 2025 data ---
     with st.expander("🎯 Fact Retrieval (2025 Data)", expanded=True):
         questions = {
             "Sponsor Lookup (July 2025)": "What company is the sponsor for Abaloparatide?",
@@ -133,8 +131,6 @@ with st.sidebar:
         for name, q in questions.items():
             if st.button(q, key=q, use_container_width=True):
                 st.session_state.run_prompt = q
-    # --- END OF DEFINITIVE FIX ---
-
 
 # --- Main Chat Interface (unchanged) ---
 st.title("Persona-Aware RAG Agent")
@@ -181,13 +177,16 @@ if prompt:
             with st.spinner(spinner_text):
                 history_for_rewrite = [f"{m['role']}: {m['content']}" for m in st.session_state.messages[-5:-1]]
                 
-                response = asyncio.run(
-                    st.session_state.agent.run(
-                        prompt, 
-                        persona=st.session_state.current_persona,
-                        chat_history=history_for_rewrite
-                    )
+                # --- START OF DEFINITIVE FIX ---
+                # REMOVED asyncio.run() as agent.run is a synchronous function.
+                # This was the cause of the ValueError crash.
+                response = st.session_state.agent.run(
+                    prompt, 
+                    persona=st.session_state.current_persona,
+                    chat_history=history_for_rewrite
                 )
+                # --- END OF DEFINITIVE FIX ---
+                
                 st.markdown(response, unsafe_allow_html=True)
                 st.session_state.messages.append({"role": "assistant", "content": response})
         else:

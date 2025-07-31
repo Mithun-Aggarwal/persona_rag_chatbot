@@ -1,0 +1,6 @@
+# config/models.yml
+models:
+  synthesis_pro: 'gemini-1.5-pro-latest'
+  synthesis_flash: 'gemini-1.5-flash-latest'
+  classification: 'gemini-1.5-flash-latest'
+  embedding: 'models/text-embedding-004'

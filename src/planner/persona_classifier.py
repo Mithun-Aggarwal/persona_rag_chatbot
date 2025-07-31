@@ -1,10 +1,10 @@
 # FILE: src/planner/persona_classifier.py
-# NEW MODULE: Analyzes a user's query and selects the most appropriate persona.
+# V1.1 (Resilience Fix): Added request_options to the generate_content call.
 
 import logging
 from typing import Literal
-
-from src.tools.clients import get_google_ai_client
+# --- DEFINITIVE FIX: Import the config and model getter ---
+from src.tools.clients import get_flash_model, DEFAULT_REQUEST_OPTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +41,9 @@ You are an expert request router. Your task is to analyze the user's question an
 
 class PersonaClassifier:
     def __init__(self):
-        genai_client = get_google_ai_client()
-        if genai_client:
-            self.llm = genai_client.GenerativeModel('gemini-1.5-flash-latest')
-        else:
-            self.llm = None
+        # --- DEFINITIVE FIX: Use the new centralized model getter ---
+        self.llm = get_flash_model()
+        if not self.llm:
             logger.error("FATAL: Gemini client not initialized, PersonaClassifier will not work.")
 
     def classify(self, query: str) -> Persona:
@@ -55,10 +53,10 @@ class PersonaClassifier:
 
         try:
             prompt = PERSONA_CLASSIFICATION_PROMPT.format(question=query)
-            response = self.llm.generate_content(prompt)
+            # --- DEFINITIVE FIX: Add request_options to the call ---
+            response = self.llm.generate_content(prompt, request_options=DEFAULT_REQUEST_OPTIONS)
             persona_key = response.text.strip()
 
-            # Basic validation to ensure it's a valid choice
             if persona_key in ["clinical_analyst", "health_economist", "regulatory_specialist"]:
                 logger.info(f"Query classified for persona: '{persona_key}'")
                 return persona_key

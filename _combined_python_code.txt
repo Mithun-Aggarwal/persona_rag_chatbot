@@ -1,6 +1,6 @@
 ========================================================================
   Combined Python Files from Git Repository: /home/mit/persona_rag_chatbot
-  Generated on: Mon 28 Jul 2025 19:03:26 AEST
+  Generated on: Wed 30 Jul 2025 17:47:43 AEST
 ========================================================================
 
 
@@ -17,106 +17,150 @@
 ########################################################################
 
 # FILE: src/agent.py
-# V2.5 (Definitive Fix): Simplifies the context formatting logic completely.
-# It now directly joins the clean, pre-formatted output from the tools.
+# V5.1 (Definitive Fix): Corrected the total latency logging to align with the new Timer class.
 
-import logging
 import json
+import logging
 import time
-from pathlib import Path
 from datetime import datetime
-from typing import List
+from pathlib import Path
+from typing import List, Dict, Any
 
 from src.tools.clients import get_google_ai_client
 from src.models import ToolResult, QueryMetadata, ToolPlanItem
 from src.planner.query_classifier import QueryClassifier
 from src.planner.tool_planner import ToolPlanner
+from src.planner.persona_classifier import PersonaClassifier
+from src.planner.query_rewriter import QueryRewriter
 from src.router.tool_router import ToolRouter
 from src.fallback import should_trigger_fallback, render_fallback_message
-from src.prompts import SYNTHESIS_PROMPT
+from src.prompts import DECOMPOSITION_PROMPT, REASONING_SYNTHESIS_PROMPT, DIRECT_SYNTHESIS_PROMPT
 
 logger = logging.getLogger(__name__)
 LOG_PATH = Path("trace_logs.jsonl")
 
 class Timer:
+    def __init__(self, name): self.name = name
     def __enter__(self):
         self.start = time.perf_counter()
-        self.duration = -1.0
         return self
     def __exit__(self, *args):
         self.end = time.perf_counter()
-        self.duration = self.end - self.start
+        duration_ms = (self.end - self.start) * 1000
+        logger.info(f"[TIMER] {self.name} took {duration_ms:.2f} ms")
 
 def log_trace(query: str, persona: str, query_meta: QueryMetadata, tool_plan: List[ToolPlanItem], tool_results: List[ToolResult], final_answer: str, total_latency_sec: float):
     trace_record = {
-        "timestamp": datetime.utcnow().isoformat() + "Z",
-        "query": query, "persona": persona,
+        "timestamp": datetime.utcnow().isoformat() + "Z", "query": query, "persona": persona,
         "intent": query_meta.intent if query_meta else "classification_failed",
         "graph_suitable": query_meta.question_is_graph_suitable if query_meta else "unknown",
-        "tool_plan": [t.model_dump() for t in tool_plan],
-        "tool_results": [r.model_dump() for r in tool_results],
+        "tool_plan": [t.model_dump() for t in tool_plan], "tool_results": [r.model_dump() for r in tool_results],
         "final_answer_preview": final_answer[:200] + "..." if final_answer else "N/A",
         "total_latency_sec": round(total_latency_sec, 3)
     }
     try:
         with open(LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(trace_record) + "\n")
-        logger.info(f"Trace logged successfully to {LOG_PATH.resolve()}")
     except Exception as e:
-        logger.error(f"Failed to write trace log: {e}", exc_info=True)
+        logger.error(f"Failed to write to trace log: {e}", exc_info=True)
 
 class Agent:
     def __init__(self, confidence_threshold: float = 0.85):
         self.classifier = QueryClassifier()
         self.planner = ToolPlanner(coverage_threshold=confidence_threshold)
         self.router = ToolRouter()
+        self.persona_classifier = PersonaClassifier()
+        self.rewriter = QueryRewriter()
         genai_client = get_google_ai_client()
         self.llm = genai_client.GenerativeModel('gemini-1.5-pro-latest') if genai_client else None
-        if not self.llm: logger.error("FATAL: Gemini client could not be initialized.")
+        self.decomposer_llm = genai_client.GenerativeModel('gemini-1.5-flash-latest') if genai_client else None
 
-    # --- START OF DEFINITIVE FIX ---
-    # REMOVED the old _format_context_for_synthesis function entirely.
-    # --- END OF DEFINITIVE FIX ---
-
-    def run(self, query: str, persona: str) -> str:
-        query_meta, tool_plan, results, final_answer = None, [], [], ""
-        timer = Timer()
-        try:
-            with timer:
-                if not self.llm: return "Error: AI model not available."
+    def _run_single_rag_step(self, query: str, persona: str) -> str:
+        with Timer(f"Single RAG Step for '{query[:30]}...'"):
+            with Timer("Query Classification"):
                 query_meta = self.classifier.classify(query)
-                if not query_meta: return "I'm sorry, I had trouble understanding your question."
+            if not query_meta: return "I had trouble understanding the sub-question."
 
+            with Timer("Tool Planning"):
                 tool_plan = self.planner.plan(query_meta, persona)
-                if not tool_plan: return "I'm sorry, I don't have a configured strategy for this persona."
+            if not tool_plan: return "I don't have a configured strategy for this sub-question."
 
-                for plan_item in tool_plan:
-                    results.append(self.router.execute_tool(plan_item.tool_name, query, query_meta))
+            results = [self.router.execute_tool(item.tool_name, query, query_meta) for item in tool_plan]
 
-                if should_trigger_fallback(results): return render_fallback_message(query)
+            if should_trigger_fallback(results): return "I searched but could not find any relevant details for this step."
+            
+            successful_content = [res.content for res in results if res.success and res.content]
+            if not successful_content: return "I found no specific details for this sub-question."
+            
+            formatted_context = "\n---\n".join(successful_content)
+            final_prompt = DIRECT_SYNTHESIS_PROMPT.format(question=query, context_str=formatted_context)
+            with Timer("Direct Synthesis LLM Call"):
+                response = self.llm.generate_content(final_prompt)
+            return response.text
 
-                # --- START OF DEFINITIVE FIX ---
-                # This is the new, simplified context assembly logic.
-                # It filters for successful tools with real content and joins them.
-                successful_content = [
-                    res.content for res in results 
-                    if res.success and res.content and "no relevant information" not in res.content.lower()
-                ]
-                formatted_context = "\n---\n".join(successful_content)
-                # --- END OF DEFINITIVE FIX ---
-
-                if not formatted_context:
-                    return "I searched for information but could not find any relevant details."
+    def run(self, query: str, persona: str, chat_history: List[str]) -> str:
+        # --- START: Definitive Fix ---
+        run_start_time = time.perf_counter()
+        final_answer = ""
+        query_meta, tool_plan, results = None, [], [] # Keep for logging
+        
+        try:
+            with Timer("Full Agent Run"):
+                if not self.llm: return "Error: AI model not available."
                 
-                final_prompt = SYNTHESIS_PROMPT.format(question=query, context_str=formatted_context)
-                final_answer = self.llm.generate_content(final_prompt).text
+                with Timer("Query Rewriting"):
+                    rewritten_query = self.rewriter.rewrite(query, chat_history)
+
+                with Timer("Decomposition"):
+                    try:
+                        decomp_prompt = DECOMPOSITION_PROMPT.format(chat_history="\n- ".join(chat_history), question=rewritten_query)
+                        decomp_response = self.decomposer_llm.generate_content(decomp_prompt)
+                        if not decomp_response.parts: raise ValueError("LLM returned empty/blocked response")
+                        plan_data = json.loads(decomp_response.text)
+                    except (json.JSONDecodeError, ValueError, Exception) as e:
+                        logger.warning(f"Could not decompose query: {e}. Defaulting to single-step plan.")
+                        plan_data = {"requires_decomposition": False, "plan": [rewritten_query]}
+                
+                requires_decomposition = plan_data.get("requires_decomposition", False)
+                plan = plan_data.get("plan", [rewritten_query])
+
+                if not requires_decomposition or len(plan) == 1:
+                    logger.info(f"Executing single-step plan for query: '{plan[0]}'")
+                    with Timer("Persona Classification"):
+                        chosen_persona = self.persona_classifier.classify(plan[0]) if persona == "automatic" else persona
+                    persona_display_name = " ".join(word.capitalize() for word in chosen_persona.split("_"))
+                    synthesis_result = self._run_single_rag_step(plan[0], chosen_persona)
+                    if persona == "automatic":
+                        final_answer = f"Acting as a **{persona_display_name}**, here is what I found:\n\n{synthesis_result}"
+                    else:
+                        final_answer = synthesis_result
+                else:
+                    logger.info(f"Executing multi-step plan for query: '{rewritten_query}'")
+                    scratchpad = []
+                    for sub_query in plan:
+                        logger.info(f"  -> Executing sub-query: '{sub_query}'")
+                        with Timer("Persona Classification (sub-query)"):
+                            sub_persona = self.persona_classifier.classify(sub_query)
+                        sub_answer = self._run_single_rag_step(sub_query, sub_persona)
+                        observation = f"Sub-Question: {sub_query}\nFinding: {sub_answer}"
+                        scratchpad.append(observation)
+                    
+                    with Timer("Reasoning Synthesis LLM Call"):
+                        synthesis_prompt = REASONING_SYNTHESIS_PROMPT.format(question=rewritten_query, scratchpad="\n\n---\n\n".join(scratchpad))
+                        synthesis_response = self.llm.generate_content(synthesis_prompt)
+                    final_answer = synthesis_response.text
+                
                 return final_answer
+
         except Exception as e:
             logger.error(f"An unexpected error occurred during agent run: {e}", exc_info=True)
-            final_answer = f"I encountered a critical error. Please check the system logs."
+            final_answer = "I encountered a critical error. Please check the system logs."
             return final_answer
         finally:
-            log_trace(query, persona, query_meta, tool_plan, results, final_answer, timer.duration)
+            run_end_time = time.perf_counter()
+            total_duration_sec = run_end_time - run_start_time
+            log_trace(query, persona, query_meta, tool_plan, results, final_answer, total_duration_sec)
+        # --- END: Definitive Fix ---
 
 
 ########################################################################
@@ -240,6 +284,82 @@ class RetrievalPlan(BaseModel):
 
 
 ########################################################################
+### FILE: src/planner/persona_classifier.py
+########################################################################
+
+# FILE: src/planner/persona_classifier.py
+# NEW MODULE: Analyzes a user's query and selects the most appropriate persona.
+
+import logging
+from typing import Literal
+
+from src.tools.clients import get_google_ai_client
+
+logger = logging.getLogger(__name__)
+
+Persona = Literal["clinical_analyst", "health_economist", "regulatory_specialist"]
+
+PERSONA_CLASSIFICATION_PROMPT = """
+You are an expert request router. Your task is to analyze the user's question and determine which specialist persona is best equipped to answer it. You must choose from the available personas and provide ONLY the persona's key name as your response.
+
+**Available Personas & Their Expertise:**
+
+1.  **`clinical_analyst`**:
+    *   Focuses on: Clinical trial data, drug efficacy, safety profiles, patient outcomes, medical conditions, and mechanisms of action.
+    *   Keywords: treat, condition, indication, dosage, patients, trial, effective, side effects.
+    *   Choose this persona for questions about the medical and scientific aspects of a drug.
+
+2.  **`health_economist`**:
+    *   Focuses on: Cost-effectiveness, pricing, market access, economic evaluations, and healthcare policy implications.
+    *   Keywords: cost, price, economic, budget, financial, value, policy, summary.
+    *   Choose this persona for questions about the financial or policy-level impact of a drug.
+
+3.  **`regulatory_specialist`**:
+    *   Focuses on: Submission types, meeting agendas, regulatory pathways (e.g., PBS listing types), sponsors, and official guidelines.
+    *   Keywords: sponsor, submission, listing, agenda, meeting, guideline, change, status.
+    *   Choose this persona for questions about the process and logistics of drug approval and listing.
+
+**User Question:**
+"{question}"
+
+**Instructions:**
+- Read the user's question carefully.
+- Compare it against the expertise of each persona.
+- Return ONLY the single key name (e.g., `clinical_analyst`) of the best-fitting persona. Do not add any explanation or other text.
+"""
+
+class PersonaClassifier:
+    def __init__(self):
+        genai_client = get_google_ai_client()
+        if genai_client:
+            self.llm = genai_client.GenerativeModel('gemini-1.5-flash-latest')
+        else:
+            self.llm = None
+            logger.error("FATAL: Gemini client not initialized, PersonaClassifier will not work.")
+
+    def classify(self, query: str) -> Persona:
+        """Classifies the query and returns the most appropriate persona key."""
+        if not self.llm:
+            return "regulatory_specialist" # A safe default
+
+        try:
+            prompt = PERSONA_CLASSIFICATION_PROMPT.format(question=query)
+            response = self.llm.generate_content(prompt)
+            persona_key = response.text.strip()
+
+            # Basic validation to ensure it's a valid choice
+            if persona_key in ["clinical_analyst", "health_economist", "regulatory_specialist"]:
+                logger.info(f"Query classified for persona: '{persona_key}'")
+                return persona_key
+            else:
+                logger.warning(f"Persona classification returned an invalid key: '{persona_key}'. Falling back to default.")
+                return "regulatory_specialist"
+        except Exception as e:
+            logger.error(f"Persona classification failed: {e}", exc_info=True)
+            return "regulatory_specialist" # Fallback on error
+
+
+########################################################################
 ### FILE: src/planner/query_classifier.py
 ########################################################################
 
@@ -284,6 +404,82 @@ if __name__ == "__main__":
     for q in test_queries:
         print(qc.classify(q))
 
+
+
+########################################################################
+### FILE: src/planner/query_rewriter.py
+########################################################################
+
+# FILE: src/planner/query_rewriter.py
+# NEW MODULE: Implements conversational memory by rewriting user queries.
+
+import logging
+from typing import List
+from src.tools.clients import get_google_ai_client
+
+logger = logging.getLogger(__name__)
+
+REWRITE_PROMPT = """
+You are an expert query analyst. Your task is to rewrite a user's latest question into a standalone question that can be understood without the context of the chat history.
+
+**CRITICAL RULES:**
+1.  **If the "Latest User Question" is already a complete, standalone question, you MUST return it exactly as it is.** Do not modify it.
+2.  If the "Latest User Question" contains pronouns (like "it", "its", "they") or ambiguous references ("this drug", "that"), use the "Chat History" to resolve these references and create a complete question.
+3.  Your output MUST be only the rewritten question. Do not add any commentary.
+
+**EXAMPLE 1 (Rewrite Needed):**
+- **Chat History:**
+  - user: Who is the sponsor for Esketamine?
+  - assistant: Janssen-Cilag Pty Ltd. is the sponsor for Esketamine.
+- **Latest User Question:** what is its use?
+- **Your Rewritten Question:** What is the use of Esketamine?
+
+**EXAMPLE 2 (No Rewrite Needed):**
+- **Chat History:**
+  - user: Who is the sponsor for Esketamine?
+  - assistant: Janssen-Cilag Pty Ltd. is the sponsor for Esketamine.
+- **Latest User Question:** What is the dosage form for Fruquintinib?
+- **Your Rewritten Question:** What is the dosage form for Fruquintinib?
+
+**TASK:**
+- **Chat History:**
+{chat_history}
+- **Latest User Question:** {question}
+
+**Your Rewritten Question:**
+"""
+
+class QueryRewriter:
+    def __init__(self):
+        genai_client = get_google_ai_client()
+        if genai_client:
+            self.llm = genai_client.GenerativeModel('gemini-1.5-flash-latest')
+        else:
+            self.llm = None
+            logger.error("FATAL: Gemini client not initialized, QueryRewriter will not work.")
+
+    def rewrite(self, query: str, chat_history: List[str]) -> str:
+        """Rewrites a conversational query into a standalone query."""
+        if not self.llm or not chat_history:
+            return query # If no history or no LLM, cannot rewrite.
+
+        try:
+            # Format the history for the prompt
+            formatted_history = "\n  - ".join(chat_history)
+            prompt = REWRITE_PROMPT.format(chat_history=formatted_history, question=query)
+            
+            response = self.llm.generate_content(prompt)
+            rewritten_query = response.text.strip()
+            
+            if rewritten_query:
+                logger.info(f"Original query: '{query}' -> Rewritten query: '{rewritten_query}'")
+                return rewritten_query
+            else:
+                logger.warning("Query rewrite resulted in an empty string. Using original query.")
+                return query
+        except Exception as e:
+            logger.error(f"Query rewriting failed: {e}", exc_info=True)
+            return query # Fallback to original query on error
 
 
 ########################################################################
@@ -411,10 +607,11 @@ class ToolPlanner:
 ########################################################################
 
 # FILE: src/prompts.py
-# V2.1: Updated Cypher prompt for case-insensitive matching.
+# V3.0 (ReAct Architecture): Added prompts for multi-step reasoning.
 
 """
-Production-grade prompts for a robust RAG agent.
+Production-grade prompts for a robust RAG agent. This version supports both
+direct RAG and a multi-step ReAct (Reason+Act) style reasoning loop.
 """
 
 QUERY_CLASSIFICATION_PROMPT = """
@@ -431,18 +628,8 @@ You are an expert query analysis agent. Your task is to analyze the user's quest
 3.  **'question_is_graph_suitable'**: Return `true` if the question involves relationships between entities (e.g., drug-to-sponsor, drug-to-condition), which are suitable for a knowledge graph. Otherwise, return `false`.
 
 Output ONLY the raw JSON object. Do not add explanations or markdown formatting.
-
-Example Question: "What is the cost-effectiveness of Abaloparatide for treating osteoporosis, and who is the sponsor?"
-Example JSON Output:
-{
-  "intent": "specific_fact_lookup",
-  "keywords": ["Abaloparatide", "osteoporosis", "cost-effectiveness", "sponsor"],
-  "question_is_graph_suitable": true
-}
 """
 
-# REFACTORED: The Cypher generation prompt is now more robust and correctly
-# uses the {schema} placeholder to accept dynamic schemas.
 CYPHER_GENERATION_PROMPT = """
 You are an expert Neo4j Cypher query developer. Your task is to convert a user's question into a single, valid, read-only Cypher query based on the provided graph schema.
 
@@ -450,25 +637,89 @@ You are an expert Neo4j Cypher query developer. Your task is to convert a user's
 {schema}
 
 **CRITICAL Instructions:**
-1.  **Use the Normalized Property:** You MUST query against the `name_normalized` property for all `WHERE` clauses. The user's input should be converted to lowercase. For example: `WHERE a.name_normalized = 'abaloparatide'`.
-2.  Construct a Cypher query that retrieves relevant information to answer the question.
-3.  The query MUST be read-only (i.e., use `MATCH` and `RETURN`). Do not use `CREATE`, `MERGE`, `SET`, or `DELETE`.
-4.  If possible, return a path `p` using `RETURN p` to show the full context of the connection.
-5.  If the question cannot be answered with the given schema, or if it's not a question for a graph database, you MUST return the single word: `NONE`.
-6.  Output ONLY the Cypher query or the word `NONE`. Do not add explanations, greetings, or markdown formatting like ```cypher.
+1.  Your `RETURN` clause should look like this: `RETURN p, properties(r) as rel_props`.
+2.  The relationship in your `MATCH` clause must be assigned to a variable `r`.
+3.  Query against the `name_normalized` property for all `WHERE` clauses on nodes.
+4.  If the question cannot be answered, you MUST return the single word: `NONE`.
+5.  Output ONLY the Cypher query or the word `NONE`.
 
 **Example Question:** "What company sponsors Abaloparatide?"
-**Example Valid Query:** MATCH p=(drug:Entity)-[:HASSPONSOR]->(sponsor:Entity) WHERE drug.name_normalized = 'abaloparatide' RETURN p
-
-**Task:**
-Generate a Cypher query for the question below.
+**Example Valid Query:** MATCH p=(drug:Entity)-[r:HASSPONSOR]->(sponsor:Entity) WHERE drug.name_normalized = 'abaloparatide' RETURN p, properties(r) as rel_props
 
 **Question:** {question}
 """
 
-# --- START OF FINAL FIX ---
-# This new SYNTHESIS_PROMPT is much more directive and strict.
-SYNTHESIS_PROMPT = """
+# --- START OF DEFINITIVE FIX ---
+
+DECOMPOSITION_PROMPT = """
+You are a master query planner. Your goal is to determine if a user's question can be answered in a single step or if it requires decomposition into multiple, simpler sub-questions.
+
+Analyze the user's question and the chat history.
+
+**Decision Criteria:**
+- **Single Step:** If the question asks for a direct fact, a summary of a single topic, or a simple definition.
+- **Decomposition:** If the question requires comparing information from two or more distinct topics (e.g., two drugs, two meetings), finding an intersection of two sets of information (e.g., "sponsors who submitted in BOTH meetings"), or involves a sequence of steps.
+
+**Output Schema:**
+You MUST output a single, valid JSON object with two keys:
+1.  `requires_decomposition`: A boolean (`true` or `false`).
+2.  `plan`: A list of strings.
+    - If `requires_decomposition` is `false`, the plan should contain a single item: the original question.
+    - If `requires_decomposition` is `true`, the plan should contain two or more simple, answerable sub-questions that build on each other to answer the original question.
+
+**Example 1 (Single Step):**
+- User Question: "What is the use of Esketamine?"
+- Your JSON Output:
+{{
+  "requires_decomposition": false,
+  "plan": ["What is the use of Esketamine?"]
+}}
+
+**Example 2 (Decomposition):**
+- User Question: "Which companies submitted drugs in both the March 2024 and May 2024 PBAC meetings?"
+- Your JSON Output:
+{{
+  "requires_decomposition": true,
+  "plan": [
+    "List all sponsors who made submissions in the March 2024 PBAC meeting documents.",
+    "List all sponsors who made submissions in the May 2024 PBAC meeting documents."
+  ]
+}}
+
+**TASK:**
+- Chat History: {chat_history}
+- User Question: {question}
+
+Now, generate the JSON output.
+"""
+
+# --- END OF DEFINITIVE FIX ---
+
+REASONING_SYNTHESIS_PROMPT = """
+You are a highly intelligent synthesis agent. Your task is to answer a user's complex original question based on a series of observations you have made by answering simpler sub-questions.
+
+**User's Original Question:** "{question}"
+
+**Your Observations (Scratchpad):**
+---
+{scratchpad}
+---
+
+**CRITICAL INSTRUCTIONS:**
+1.  Read the user's original question and all your observations from the scratchpad.
+2.  Synthesize a final, comprehensive answer to the original question.
+3.  **Do not show your step-by-step reasoning.** Just provide the final, clean answer.
+4.  If your observations are insufficient to answer the question, clearly state what information you found and why it is not enough.
+5.  Include citations from your observations where appropriate.
+
+**Final Answer:**
+"""
+
+# --- END: New Prompts for ReAct Agent ---
+
+
+# --- START OF DEFINITIVE FIX ---
+DIRECT_SYNTHESIS_PROMPT = """
 You are a highly precise AI assistant for pharmaceutical and regulatory analysis. Your task is to answer a user's question based *only* on the provided evidence. You must follow all rules strictly.
 
 **User's Question:** "{question}"
@@ -478,35 +729,35 @@ You are a highly precise AI assistant for pharmaceutical and regulatory analysis
 **Rule 1: Synthesize a Factual Answer**
 - Read all the provided "Evidence" blocks below.
 - Formulate a single, comprehensive answer to the user's question.
-- **Do not mention the tools** (e.g., "query_knowledge_graph", "retrieve_clinical_data"). The user only cares about the information, not the source tool.
 
 **Rule 2: Cite Every Fact with Clickable Links**
-- The evidence contains Markdown-formatted citations like `[Source: DOC_ID, Page: X](URL)`.
-- As you write your answer, you MUST place the corresponding citation immediately after the sentence or clause it supports.
-- If multiple pieces of evidence support a single sentence, include all their citations. For example: `This is a fact [Source: Doc A, Page: 1](url) [Source: Doc B, Page: 5](url).`
+- The evidence contains HTML `<a>` tags for citations. They look like `<a href="URL" target="_blank">Display Text</a>`.
+- As you write your answer, you MUST place the corresponding HTML citation tag immediately after the sentence or clause it supports.
 
 **Rule 3: Create a Clean Reference List**
-- After your answer, create a "References" section.
-- List each unique clickable Markdown citation link that you used in your answer.
-- **Do NOT list tool names or any other text in the references.**
+- After your answer, add a `### References` section.
+- List each unique HTML citation tag that you used in your answer. Each link should be on its own line, preceded by a bullet point.
+- **If no evidence was used to form the answer, you MUST state "No references were used for this response."**
 
 **Rule 4: Honesty is Critical**
-- If the provided evidence is insufficient to answer the question, you MUST state that clearly. For example: "Based on the available documents, I could not find information about X."
-- Do not invent, infer, or use outside knowledge.
+- If the evidence is insufficient to answer the question, you MUST state that clearly.
 
+---
 **Example of a PERFECT response:**
-Theramex Australia Pty Ltd sponsors the drug Abaloparatide Source: July-2025-PBAC-Meeting-v4, Page: 2. It is indicated for the treatment of severe established osteoporosis Source: July-2025-PBAC-Meeting-v4, Page: 2.
-References
-Source: July-2025-PBAC-Meeting-v4, Page: 2
-Generated code
+
+Belzutifan is used to treat VHL disease <a href="..." target="_blank">PBAC-meeting-agenda-July-2024-v7 (Page 4)</a> and renal cell carcinoma <a href="..." target="_blank">PBAC-meeting-agenda-July-2024-v7 (Page 4)</a>.
+
+### References
+- <a href="..." target="_blank">PBAC-meeting-agenda-July-2024-v7 (Page 4)</a>
+
 ---
 **Evidence:**
 {context_str}
 ---
 
-**ANSWER:**
+**FINAL ANSWER:**
 """
-# --- END OF FINAL FIX ---
+# --- END OF DEFINITIVE FIX ---
 
 
 ########################################################################
@@ -521,78 +772,38 @@ Generated code
 ########################################################################
 
 # FILE: src/router/tool_router.py
-# V2.0: Modular dispatcher for the unified agent.
-"""
-Maps tool names from the planner to callable functions from the tool library.
-This module replaces hardcoded routing with a pluggable, extensible registry.
-"""
+# V4.0 (Definitive Sync): Reverted to a simple, synchronous tool dispatcher.
+
 import logging
 from typing import Callable, Dict
 
 from src.models import QueryMetadata, ToolResult
-from src.tools import retrievers # Import the entire retrievers module
+from src.tools import retrievers
 
 logger = logging.getLogger(__name__)
 
 class ToolRouter:
-    """
-    Executes a specific tool by name, providing a unified and safe interface.
-    """
     def __init__(self):
-        """
-        Initializes the router by creating a registry of all available tools.
-        The keys MUST match the 'tool_name' in `persona_tool_map.yml` and the planner logic.
-        """
         self.registry: Dict[str, Callable[[str, QueryMetadata], ToolResult]] = {
-            # Vector Search Tools
             "retrieve_clinical_data": retrievers.retrieve_clinical_data,
             "retrieve_summary_data": retrievers.retrieve_summary_data,
             "retrieve_general_text": retrievers.retrieve_general_text,
-            
-            # Graph Search Tool
             "query_knowledge_graph": retrievers.query_knowledge_graph,
-            
-            # Future tools can be added here easily:
-            # "search_live_web": tools.search_live_web,
         }
-        logger.info(f"ToolRouter initialized with {len(self.registry)} tools: {list(self.registry.keys())}")
+        logger.info(f"ToolRouter initialized with {len(self.registry)} tools.")
 
     def execute_tool(self, tool_name: str, query: str, query_meta: QueryMetadata) -> ToolResult:
-        """
-        Looks up a tool by name in the registry and executes it.
-
-        Args:
-            tool_name: The name of the tool to execute.
-            query: The original user query.
-            query_meta: The structured metadata about the query.
-
-        Returns:
-            A ToolResult object with the outcome of the execution.
-        """
-        logger.info(f"[ToolRouter] Attempting to execute tool: '{tool_name}'")
-        
+        logger.info(f"[ToolRouter] Executing tool: '{tool_name}'")
         tool_function = self.registry.get(tool_name)
-
         if not tool_function:
-            logger.warning(f"[ToolRouter] Tool '{tool_name}' not found in registry. Returning a failure result.")
-            return ToolResult(
-                tool_name=tool_name, 
-                success=False, 
-                content="[Error: Tool not implemented or misconfigured]"
-            )
-
+            logger.warning(f"Tool '{tool_name}' not found in registry.")
+            return ToolResult(tool_name=tool_name, success=False, content="[Error: Tool not implemented]")
         try:
-            # Call the registered function with the required arguments
+            # Simple, direct function call
             return tool_function(query, query_meta)
         except Exception as e:
-            # This is a critical safety net. If a tool fails unexpectedly,
-            # it won't crash the entire agent.
-            logger.error(f"[ToolRouter] Tool '{tool_name}' failed with an unhandled exception: {e}", exc_info=True)
-            return ToolResult(
-                tool_name=tool_name, 
-                success=False, 
-                content=f"An unexpected error occurred in the tool: {e}"
-            )
+            logger.error(f"[ToolRouter] Tool '{tool_name}' failed: {e}", exc_info=True)
+            return ToolResult(tool_name=tool_name, success=False, content=f"An error occurred: {e}")
 
 
 ########################################################################
@@ -683,10 +894,11 @@ def get_neo4j_driver() -> neo4j.Driver:
 ########################################################################
 
 # FILE: src/tools/retrievers.py
-# V3.0 (Production Ready): Final, confirmed version.
+# V5.0 (Definitive Sync): Reverted to a stable, synchronous architecture with timing logs.
 
 import logging
-from typing import List
+import time
+from typing import List, Dict, Any
 import neo4j
 
 from src.tools.clients import get_google_ai_client, get_pinecone_index, get_neo4j_driver
@@ -695,88 +907,115 @@ from src.prompts import CYPHER_GENERATION_PROMPT
 
 logger = logging.getLogger(__name__)
 
-# --- Helper Functions ---
+class Timer:
+    """A simple context manager for timing code blocks."""
+    def __init__(self, name):
+        self.name = name
+    def __enter__(self):
+        self.start = time.perf_counter()
+        return self
+    def __exit__(self, *args):
+        self.end = time.perf_counter()
+        duration = (self.end - self.start) * 1000
+        logger.info(f"[TIMER] {self.name} took {duration:.2f} ms")
 
+# --- Helper Functions (Unchanged) ---
 def _format_pinecone_results(matches: List[dict]) -> List[str]:
+    # ... (code is identical to previous correct version)
     contents = []
     for match in matches:
         metadata = match.get('metadata', {})
         text = metadata.get('text', 'No content available.')
         doc_id = metadata.get('doc_id', 'Unknown Document')
-        page_num = metadata.get('page_number', 'N/A')
+        page_numbers = metadata.get('page_numbers', [])
         url = metadata.get('source_pdf_url', '#')
-        citation = f"[Source: {doc_id}, Page: {page_num}]({url})"
-        contents.append(f"{text}\n{citation}")
+        page_str = ", ".join(map(str, sorted(list(set(page_numbers))))) if page_numbers else "N/A"
+        link_url = f"{url}#page={page_numbers[0]}" if page_numbers else url
+        citation_text = f"{doc_id} (Page {page_str})"
+        citation = f'<a href="{link_url}" target="_blank">{citation_text}</a>'
+        contents.append(f"Evidence from document: {text}\nCitation: {citation}")
     return contents
 
-def _serialize_neo4j_path(path: neo4j.graph.Path) -> str:
-    citations = set()
-    if len(path.nodes) == 2 and len(path.relationships) == 1:
-        subject = path.start_node.get('name', 'Unknown')
-        predicate = path.relationships[0].type.replace('_', ' ').lower()
-        object_val = path.end_node.get('name', 'Unknown')
-        rel = path.relationships[0]
-        
-        doc_id = rel.get('doc_id', 'Unknown Document')
-        url = rel.get('source_pdf_url', '#')
-        page_num = rel.get('page_numbers', 'N/A')
-        citation = f"[Source: {doc_id}, Page: {page_num}]({url})"
-        citations.add(citation)
-        
-        text_representation = f"{subject} {predicate} {object_val}."
-        citation_str = " ".join(sorted(list(citations)))
-        return f"{text_representation}\n{citation_str}"
+def _serialize_neo4j_path(record: Dict[str, Any]) -> str:
+    # ... (code is identical to previous correct version)
+    path_data, rel_props = record.get("p"), record.get("rel_props")
+    subject, predicate, object_val = None, None, None
+    if isinstance(path_data, neo4j.graph.Path):
+        subject, predicate, object_val = path_data.start_node.get('name'), path_data.relationships[0].type, path_data.end_node.get('name')
+    elif isinstance(path_data, list) and len(path_data) >= 3:
+        subject, predicate, object_val = path_data[0].get('name'), str(path_data[1]), path_data[2].get('name')
+    if not all([subject, predicate, object_val]):
+        return f"A complex relationship found. <a href='#' target='_blank'>Knowledge Graph</a>"
+    text_representation = f"{subject} {predicate.replace('_', ' ').lower()} {object_val}."
+    if isinstance(rel_props, dict):
+        doc_id, url, page_num_str = rel_props.get('doc_id'), rel_props.get('source_pdf_url'), rel_props.get('page_numbers', 'N/A')
+        if url and doc_id:
+            first_page = page_num_str.split(',')[0].strip()
+            link_url = f"{url}#page={first_page}" if first_page.isdigit() else url
+            citation_text = f"{doc_id} (Page {page_num_str})"
+            citation = f'<a href="{link_url}" target="_blank">{citation_text}</a>'
+            return f"Evidence from graph: {text_representation}\nCitation: {citation}"
+    return f"Evidence from graph: {text_representation}\nCitation: <a href='#' target='_blank'>Knowledge Graph</a>"
 
-    return f"A complex relationship was found in the knowledge graph.\n[Source: Knowledge Graph, Page: N/A](#)"
+
+# --- Tool Functions (DEFINITIVE SYNC FIX) ---
 
 def _vector_search_tool(query: str, namespace: str, tool_name: str, top_k: int = 7) -> ToolResult:
-    pinecone_index = get_pinecone_index()
-    embedding_client = get_google_ai_client()
-    if not pinecone_index or not embedding_client: return ToolResult(tool_name=tool_name, success=False, content="Vector search client not available.")
-    try:
-        query_embedding = embedding_client.embed_content(model='models/text-embedding-004', content=query, task_type="retrieval_query")['embedding']
-        response = pinecone_index.query(namespace=namespace, vector=query_embedding, top_k=top_k, include_metadata=True)
-        if not response.get('matches'): return ToolResult(tool_name=tool_name, success=True, content="")
-        content_list = _format_pinecone_results(response['matches'])
-        return ToolResult(tool_name=tool_name, success=True, content="\n---\n".join(content_list))
-    except Exception as e:
-        return ToolResult(tool_name=tool_name, success=False, content=f"An error occurred in the tool: {e}")
+    with Timer(f"Tool: {tool_name}"):
+        pinecone_index = get_pinecone_index()
+        embedding_client = get_google_ai_client()
+        if not pinecone_index or not embedding_client: 
+            return ToolResult(tool_name=tool_name, success=False, content="Vector search client not available.")
+        try:
+            with Timer("Embedding Generation"):
+                query_embedding = embedding_client.embed_content(model='models/text-embedding-004', content=query, task_type="retrieval_query")
+            with Timer("Pinecone Query"):
+                response = pinecone_index.query(namespace=namespace, vector=query_embedding['embedding'], top_k=top_k, include_metadata=True)
+            if not response.get('matches'): return ToolResult(tool_name=tool_name, success=True, content="")
+            content_list = _format_pinecone_results(response['matches'])
+            return ToolResult(tool_name=tool_name, success=True, content="\n---\n".join(content_list))
+        except Exception as e:
+            logger.error(f"Error in vector search tool '{tool_name}': {e}", exc_info=True)
+            return ToolResult(tool_name=tool_name, success=False, content=f"An error occurred: {e}")
 
 def retrieve_clinical_data(query: str, query_meta: QueryMetadata) -> ToolResult:
     return _vector_search_tool(query, "pbac-clinical", "retrieve_clinical_data")
+
 def retrieve_summary_data(query: str, query_meta: QueryMetadata) -> ToolResult:
     return _vector_search_tool(query, "pbac-summary", "retrieve_summary_data")
+
 def retrieve_general_text(query: str, query_meta: QueryMetadata) -> ToolResult:
     return _vector_search_tool(query, "pbac-text", "retrieve_general_text")
 
 def query_knowledge_graph(query: str, query_meta: QueryMetadata) -> ToolResult:
-    tool_name = "query_knowledge_graph"
-    if not query_meta.question_is_graph_suitable: return ToolResult(tool_name=tool_name, success=True, content="")
-    llm = get_google_ai_client().GenerativeModel('gemini-1.5-flash-latest')
-    driver = get_neo4j_driver()
-    if not llm or not driver: return ToolResult(tool_name=tool_name, success=False, content="LLM or Neo4j client is not available.")
-    try:
-        with driver.session() as session:
-            schema_data = session.run("CALL db.schema.visualization()").data()
-        schema_str = f"Node labels and properties: {schema_data[0]['nodes']}\nRelationship types: {schema_data[0]['relationships']}"
-        prompt = CYPHER_GENERATION_PROMPT.format(schema=schema_str, question=query)
-        response = llm.generate_content(prompt)
-        cypher_query = response.text.strip().replace("```cypher", "").replace("```", "")
-        if "none" in cypher_query.lower() or "match" not in cypher_query.lower(): return ToolResult(tool_name=tool_name, success=True, content="")
-        logger.info(f"Generated Cypher: {cypher_query}")
-    except Exception as e:
-        return ToolResult(tool_name=tool_name, success=False, content=f"Cypher generation failed: {e}")
-    try:
-        with driver.session() as session:
-            records = session.run(cypher_query).data()
-        if not records: return ToolResult(tool_name=tool_name, success=True, content="")
-        results = [
-            _serialize_neo4j_path(record["p"]) if "p" in record and isinstance(record["p"], neo4j.graph.Path) else f"{str(record)}\n[Source: Knowledge Graph, Page: N/A](#)"
-            for record in records
-        ]
-        return ToolResult(tool_name=tool_name, success=True, content="\n".join(results))
-    except Exception as e:
-        return ToolResult(tool_name=tool_name, success=False, content=f"Cypher execution failed: {e}")
+    with Timer("Tool: query_knowledge_graph"):
+        tool_name = "query_knowledge_graph"
+        if not query_meta.question_is_graph_suitable: 
+            return ToolResult(tool_name=tool_name, success=True, content="")
+        llm = get_google_ai_client().GenerativeModel('gemini-1.5-flash-latest')
+        driver = get_neo4j_driver()
+        if not llm or not driver: return ToolResult(tool_name=tool_name, success=False, content="LLM or Neo4j client not available.")
+        try:
+            with Timer("KG Schema Fetch"):
+                with driver.session() as session: schema_data = session.run("CALL db.schema.visualization()").data()
+            schema_str = f"Node labels: {schema_data[0]['nodes']}\nRelationships: {schema_data[0]['relationships']}"
+            prompt = CYPHER_GENERATION_PROMPT.format(schema=schema_str, question=query)
+            with Timer("Cypher Generation LLM Call"):
+                response = llm.generate_content(prompt)
+            cypher_query = response.text.strip().replace("```cypher", "").replace("```", "")
+            if "none" in cypher_query.lower() or "match" not in cypher_query.lower(): 
+                return ToolResult(tool_name=tool_name, success=True, content="")
+            logger.info(f"Generated Cypher: {cypher_query}")
+        except Exception as e:
+            return ToolResult(tool_name=tool_name, success=False, content=f"Cypher generation failed: {e}")
+        try:
+            with Timer("KG Query Execution"):
+                with driver.session() as session: records = session.run(cypher_query).data()
+            if not records: return ToolResult(tool_name=tool_name, success=True, content="")
+            results = [_serialize_neo4j_path(record) for record in records if record.get("p")]
+            return ToolResult(tool_name=tool_name, success=True, content="\n".join(results))
+        except Exception as e:
+            return ToolResult(tool_name=tool_name, success=False, content=f"Cypher execution failed: {e}")
 
 
 ########################################################################
@@ -784,19 +1023,16 @@ def query_knowledge_graph(query: str, query_meta: QueryMetadata) -> ToolResult:
 ########################################################################
 
 # FILE: streamlit_app.py
-# V2.2: UI updated with categorized test questions for robust evaluation.
+# V3.0 (Final Demo Version): Evaluation questions are now targeted at the clean 2025 data.
 
 import streamlit as st
 import logging
+import os
+import asyncio
 from dotenv import load_dotenv
 
 # --- CRITICAL: Load environment variables at the very top ---
-# This ensures all modules can access them when imported.
 load_dotenv()
-
-# Now import project modules
-from src.agent import Agent
-from src.tools.clients import get_google_ai_client # Used for a pre-flight check
 
 # --- Page and Logging Configuration ---
 st.set_page_config(
@@ -810,7 +1046,16 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - [%(levelname)s] - [%(name)s:%(lineno)d] - %(message)s'
 )
+logging.getLogger('streamlit').setLevel(logging.WARNING)
+logging.getLogger('watchdog').setLevel(logging.WARNING)
+logging.getLogger('PIL').setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
+
+# Now import project modules
+from src.agent import Agent
+from src.tools.clients import get_google_ai_client # Used for a pre-flight check
+
 
 # --- Session State Initialization ---
 if "agent" not in st.session_state:
@@ -818,16 +1063,11 @@ if "agent" not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "current_persona" not in st.session_state:
-    st.session_state.current_persona = "clinical_analyst"
+    st.session_state.current_persona = "automatic"
 
-# --- Helper Functions ---
+# --- Helper Functions (unchanged) ---
 @st.cache_resource
 def initialize_agent():
-    """
-    Initializes the agent once and caches it.
-    Returns the agent instance or None if initialization fails.
-    """
-    # Pre-flight check for API key to provide a better error message.
     if not get_google_ai_client():
         st.error("Google API Key is not configured. Please set the GOOGLE_API_KEY in your .env file.", icon="🚨")
         return None
@@ -841,72 +1081,68 @@ def initialize_agent():
         return None
 
 def reset_chat(persona_name: str):
-    """Resets the chat history for a new conversation."""
+    display_name = "Automatic" if persona_name == "Automatic (Recommended)" else persona_name
     st.session_state.messages = [
-        {"role": "assistant", "content": f"Hi! I'm now acting as a **{persona_name}**. How can I help you?"}
+        {"role": "assistant", "content": f"Hi! I'm now acting in **{display_name}** mode. How can I help you?"}
     ]
 
-# --- Sidebar ---
+# --- Sidebar (unchanged) ---
 with st.sidebar:
     st.header("🤖 Persona RAG Chatbot")
     st.markdown("Select a persona to tailor my retrieval strategy and answers to your specific role.")
-
     persona_options = {
+        'Automatic (Recommended)': 'automatic',
         'Clinical Analyst': 'clinical_analyst',
         'Health Economist': 'health_economist',
         'Regulatory Specialist': 'regulatory_specialist',
     }
-    
     current_display_name = [k for k, v in persona_options.items() if v == st.session_state.current_persona][0]
-    
     selected_persona_name = st.radio(
-        "**Choose your Persona:**",
+        "**Choose your Mode:**",
         options=persona_options.keys(),
         index=list(persona_options.keys()).index(current_display_name),
         key="persona_selector"
     )
-    
     selected_persona_key = persona_options[selected_persona_name]
-
     if selected_persona_key != st.session_state.current_persona:
         st.session_state.current_persona = selected_persona_key
         reset_chat(selected_persona_name)
         st.rerun()
-
     st.divider()
     if st.button("🔄 Clear Chat History", use_container_width=True):
         reset_chat(selected_persona_name)
         st.rerun()
-
     st.divider()
     st.header("🧪 Evaluation Questions")
-    st.markdown("Use these questions to test the agent's capabilities.")
+    st.markdown("Use these questions to test the agent's capabilities with the 2025 data.")
 
-    # --- NEW: Categorized Test Questions ---
-    with st.expander("🎯 Fact Retrieval (High Precision)"):
+    # --- START OF DEFINITIVE FIX: Updated Evaluation Questions for 2025 data ---
+    with st.expander("🎯 Fact Retrieval (2025 Data)", expanded=True):
         questions = {
-            "Graph-based query": "What company sponsors the drug Abaloparatide?",
-            "Specific indication": "Which condition is Amivantamab intended to treat?",
-            "Dosage form lookup": "What is the dosage form of Daratumumab?",
-            "Sponsor for combination": "Which sponsor is associated with the combination of Dabrafenib and Trametinib?",
+            "Sponsor Lookup (July 2025)": "What company is the sponsor for Abaloparatide?",
+            "Indication Lookup (March 2025)": "What is Amivantamab used to treat?",
+            "Trade Name Lookup (May 2025)": "What is the trade name for Dostarlimab?",
+            "Dosage Form (July 2025)": "What is the dosage form of Apomorphine?",
         }
         for name, q in questions.items():
             if st.button(f"{name}: {q}", key=q, use_container_width=True):
                 st.session_state.run_prompt = q
 
-    with st.expander("⚖️ Comparative Analysis"):
+    with st.expander("⚖️ Multi-Step Reasoning (2025 Data)"):
         questions = {
-            "Compare two drugs for NSCLC": "Compare Amivantamab and Osimertinib for non-small cell lung cancer.",
-            "Compare submissions by date": "What were the key differences in submissions between the March and July 2025 PBAC meetings?",
+            "Intersection Query": "Which sponsors made submissions in both the March 2025 and July 2025 meetings?",
+            "Comparative Query": "Compare the submission purposes for Acalabrutinib and Alectinib in the 2025 meetings.",
+            "Multi-Hop Query": "What is the indication for the drug whose trade name is Cabometyx?",
         }
         for name, q in questions.items():
             if st.button(q, key=q, use_container_width=True):
                 st.session_state.run_prompt = q
     
-    with st.expander("📋 Summarization"):
+    with st.expander("📋 Summarization (2025 Data)"):
         questions = {
-            "Summarize a drug's submission": "Provide a summary of the PBAC submission for Alectinib.",
-            "Summarize a meeting": "Summarize all submissions related to oncology in the May 2025 meeting.",
+            "Summarize a Meeting": "Provide a summary of the key submissions from the May 2025 PBAC meeting.",
+            "Summarize by Theme": "Summarize all submissions related to oncology in the March 2025 documents.",
+            "Synthesize High-Level Goal": "Based on the agendas, what appears to be the main focus of the PBAC's work in 2025?",
         }
         for name, q in questions.items():
             if st.button(q, key=q, use_container_width=True):
@@ -914,31 +1150,43 @@ with st.sidebar:
 
     with st.expander("🤔 Challenging / Ambiguous Questions"):
         questions = {
-            "Test fallback logic": "What is the price of Abaloparatide?", # Price is explicitly excluded from consumer comments
-            "Broad, multi-hop query": "Find sponsors who made submissions for both lung cancer and melanoma in 2025.",
-            "Out of scope": "What are the latest FDA guidelines?", # Tests if it hallucinates or admits it doesn't know
+            "Test Data Boundaries": "What was the final PBAC decision on Ribociclib from the July 2025 meeting?",
+            "Test Fallback Logic (No Price)": "What is the price of Tirzepatide?",
+            "Out of Scope (External Knowledge)": "What are the latest FDA guidelines on biosimilars?",
         }
         for name, q in questions.items():
             if st.button(q, key=q, use_container_width=True):
                 st.session_state.run_prompt = q
+    # --- END OF DEFINITIVE FIX ---
 
-# --- Main Chat Interface ---
+
+# --- Main Chat Interface (unchanged) ---
 st.title("Persona-Aware RAG Agent")
-st.caption(f"Currently acting as: **{selected_persona_name}**")
+if st.session_state.current_persona == "automatic":
+    st.caption("Currently in **Automatic Mode** (selects best persona per query)")
+else:
+    st.caption(f"Currently acting as: **{selected_persona_name}**")
+with st.container(border=True):
+    st.info("""
+    **Welcome! This is an advanced chatbot designed to answer questions about pharmaceutical and regulatory documents.** 
+    
+    Its unique feature is the ability to tailor its information retrieval strategy based on the professional role you select in the sidebar.
 
-# Initialize agent on first run and handle potential failure.
+    **How to use this demo:**
+    1.  **Choose Your Mode:** Select 'Automatic' (Recommended) or a specific persona from the sidebar.
+    2.  **Ask a Question:** Use the pre-defined 'Evaluation Questions' or type your own question in the chat box below.
+    """)
+    st.markdown("<p style='text-align: center; color: grey;'>A not-for-profit demonstration project by <b>EVIL_MIT</b></p>", unsafe_allow_html=True)
+
 if st.session_state.agent is None:
     st.session_state.agent = initialize_agent()
-    # If this is the first run, set the initial message.
     if not st.session_state.messages:
         reset_chat(selected_persona_name)
 
-# Display chat messages
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"], unsafe_allow_html=True)
 
-# Handle user input from both chat box and sidebar buttons
 prompt_from_button = st.session_state.pop("run_prompt", None)
 prompt_from_input = st.chat_input("Ask your question...")
 prompt = prompt_from_button or prompt_from_input
@@ -950,14 +1198,25 @@ if prompt:
 
     with st.chat_message("assistant"):
         if st.session_state.agent:
-            with st.spinner(f"Thinking as a {selected_persona_name}..."):
-                response = st.session_state.agent.run(prompt, persona=st.session_state.current_persona)
+            spinner_text = "Thinking..."
+            if st.session_state.current_persona != "automatic":
+                 spinner_text = f"Thinking as a {selected_persona_name}..."
+            
+            with st.spinner(spinner_text):
+                history_for_rewrite = [f"{m['role']}: {m['content']}" for m in st.session_state.messages[-5:-1]]
+                
+                response = asyncio.run(
+                    st.session_state.agent.run(
+                        prompt, 
+                        persona=st.session_state.current_persona,
+                        chat_history=history_for_rewrite
+                    )
+                )
                 st.markdown(response, unsafe_allow_html=True)
                 st.session_state.messages.append({"role": "assistant", "content": response})
         else:
             st.error("Agent is not available due to an initialization error. Please check the terminal logs.")
             st.stop()
     
-    # Rerun to clear input box if a button was used
     if prompt_from_button:
         st.rerun()

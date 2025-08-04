@@ -1,0 +1,154 @@
+
+  You can now view your Streamlit app in your browser.
+
+  Local URL: http://localhost:8502
+  Network URL: http://192.168.20.19:8502
+
+2025-08-04 20:40:20,725 - [INFO] - [src.tools.clients:48] - Google AI client configured successfully.
+2025-08-04 20:40:20,725 - [INFO] - [src.tools.clients:65] - Requesting Flash Model: gemini-1.5-flash-latest
+2025-08-04 20:40:20,727 - [INFO] - [src.planner.tool_planner:58] - Successfully loaded persona-tool map from '/home/mit/persona_rag_chatbot/config/persona_tool_map.yml'.
+2025-08-04 20:40:20,727 - [INFO] - [src.router.tool_router:19] - ToolRouter initialized with 2 tools.
+2025-08-04 20:40:20,727 - [INFO] - [src.tools.clients:58] - Requesting GenerativeModel: gemini-1.5-pro-latest
+2025-08-04 20:40:20,727 - [INFO] - [src.tools.clients:65] - Requesting Flash Model: gemini-1.5-flash-latest
+2025-08-04 20:40:20,727 - [INFO] - [__main__:51] - Unified agent initialized successfully and cached for the session.
+2025-08-04 20:40:31,700 - [INFO] - [src.planner.query_rewriter:63] - Query deemed standalone. Bypassing LLM rewrite. Query: 'Compare the submission purposes for Acalabrutinib and Alectinib in the 2025 meetings.'
+2025-08-04 20:40:32,295 - [INFO] - [src.planner.persona_classifier:61] - Query classified for persona: 'regulatory_specialist'
+2025-08-04 20:40:33,649 - [INFO] - [src.agent:46] - [TIMER] Decomposition took 1353.78 ms
+2025-08-04 20:40:33,649 - [INFO] - [src.agent:190] - Executing multi-step plan for query: 'Compare the submission purposes for Acalabrutinib and Alectinib in the 2025 meetings.'
+2025-08-04 20:40:33,649 - [INFO] - [src.planner.query_classifier:37] - Classifying query: What was the submission purpose for Acalabrutinib in the 2025 meetings?
+2025-08-04 20:40:33,649 - [INFO] - [src.planner.query_classifier:37] - Classifying query: What was the submission purpose for Alectinib in the 2025 meetings?
+2025-08-04 20:40:34,637 - [INFO] - [src.planner.query_classifier:50] - Classification result: {
+  "intent": "specific_fact_lookup",
+  "keywords": [
+    "Acalabrutinib",
+    "2025 meetings",
+    "submission purpose"
+  ],
+  "question_is_graph_suitable": true,
+  "themes": [
+    "Regulatory History"
+  ]
+}
+2025-08-04 20:40:34,637 - [INFO] - [src.planner.tool_planner:67] - Planning tools for intent 'specific_fact_lookup' and persona 'regulatory_specialist'
+2025-08-04 20:40:34,637 - [INFO] - [src.planner.tool_planner:110] - Coverage threshold of 0.85 met. Finalizing plan.
+2025-08-04 20:40:34,637 - [INFO] - [src.planner.tool_planner:113] - Generated tool plan: ['{\n  "tool_name": "query_knowledge_graph",\n  "estimated_coverage": 0.81\n}', '{\n  "tool_name": "vector_search",\n  "estimated_coverage": 0.5\n}']
+2025-08-04 20:40:34,637 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'query_knowledge_graph'
+2025-08-04 20:40:35,275 - [INFO] - [src.planner.query_classifier:50] - Classification result: {
+  "intent": "specific_fact_lookup",
+  "keywords": [
+    "Alectinib",
+    "submission purpose",
+    "2025 meetings"
+  ],
+  "question_is_graph_suitable": true,
+  "themes": [
+    "Regulatory History"
+  ]
+}
+2025-08-04 20:40:35,275 - [INFO] - [src.planner.tool_planner:67] - Planning tools for intent 'specific_fact_lookup' and persona 'regulatory_specialist'
+2025-08-04 20:40:35,275 - [INFO] - [src.planner.tool_planner:110] - Coverage threshold of 0.85 met. Finalizing plan.
+2025-08-04 20:40:35,275 - [INFO] - [src.planner.tool_planner:113] - Generated tool plan: ['{\n  "tool_name": "query_knowledge_graph",\n  "estimated_coverage": 0.81\n}', '{\n  "tool_name": "vector_search",\n  "estimated_coverage": 0.5\n}']
+2025-08-04 20:40:35,275 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'query_knowledge_graph'
+2025-08-04 20:40:35,793 - [INFO] - [src.tools.clients:97] - Neo4j driver connected successfully.
+2025-08-04 20:40:36,421 - [INFO] - [src.tools.clients:97] - Neo4j driver connected successfully.
+2025-08-04 20:40:36,571 - [INFO] - [src.tools.retrievers:23] - [TIMER] Tool: query_knowledge_graph took 1933.84 ms
+2025-08-04 20:40:36,571 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'vector_search'
+2025-08-04 20:40:37,738 - [INFO] - [src.tools.clients:79] - Pinecone index 'pbac-rag-index' connected successfully.
+2025-08-04 20:40:37,739 - [INFO] - [src.tools.retrievers:89] - Applying metadata filter: {'semantic_purpose': {'$in': ['Regulatory History']}}
+2025-08-04 20:40:38,123 - [INFO] - [src.tools.retrievers:134] - Generated Cypher: MATCH p=(drug:Entity)-[r:HASSUBMISSIONTYPE]->(submission:Entity) WHERE drug.name_normalized = 'alectinib' AND toString(r.meeting_year) CONTAINS '2025' RETURN p, properties(r) as rel_props
+2025-08-04 20:40:38,375 - [INFO] - [src.tools.retrievers:23] - [TIMER] Tool: query_knowledge_graph took 3099.05 ms
+2025-08-04 20:40:38,375 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'vector_search'
+2025-08-04 20:40:38,375 - [INFO] - [src.tools.retrievers:89] - Applying metadata filter: {'semantic_purpose': {'$in': ['Regulatory History']}}
+2025-08-04 20:40:39,516 - [INFO] - [src.tools.retrievers:23] - [TIMER] Tool: vector_search took 2944.64 ms
+2025-08-04 20:40:40,045 - [INFO] - [src.agent:79] - Re-ranked 10 snippets down to 0 using Gemini.
+2025-08-04 20:40:40,045 - [INFO] - [src.agent:46] - [TIMER] Re-ranking with Gemini took 528.61 ms
+2025-08-04 20:40:40,045 - [INFO] - [src.agent:46] - [TIMER] Single RAG Step for 'What was the submission purpos...' took 6395.91 ms
+2025-08-04 20:40:40,416 - [INFO] - [src.tools.retrievers:23] - [TIMER] Tool: vector_search took 2040.76 ms
+2025-08-04 20:40:41,183 - [INFO] - [src.agent:79] - Re-ranked 10 snippets down to 0 using Gemini.
+2025-08-04 20:40:41,184 - [INFO] - [src.agent:46] - [TIMER] Re-ranking with Gemini took 767.75 ms
+2025-08-04 20:40:41,184 - [INFO] - [src.agent:46] - [TIMER] Single RAG Step for 'What was the submission purpos...' took 7534.22 ms
+2025-08-04 20:40:42,956 - [INFO] - [src.agent:46] - [TIMER] Reasoning Synthesis LLM Call (Pro) took 1772.07 ms
+2025-08-04 20:40:42,956 - [INFO] - [src.agent:46] - [TIMER] Full Agent Run took 11256.22 ms
+2025-08-04 20:40:46,119 - [INFO] - [src.planner.query_rewriter:63] - Query deemed standalone. Bypassing LLM rewrite. Query: 'What is the indication for the drug whose trade name is Cabometyx?'
+2025-08-04 20:40:46,604 - [INFO] - [src.planner.persona_classifier:61] - Query classified for persona: 'clinical_analyst'
+2025-08-04 20:40:47,848 - [INFO] - [src.agent:46] - [TIMER] Decomposition took 1244.36 ms
+2025-08-04 20:40:47,848 - [INFO] - [src.agent:187] - Executing single-step plan for query: 'What is the indication for the drug whose trade name is Cabometyx?'
+2025-08-04 20:40:47,849 - [INFO] - [src.planner.query_classifier:37] - Classifying query: What is the indication for the drug whose trade name is Cabometyx?
+2025-08-04 20:40:48,499 - [INFO] - [src.planner.query_classifier:50] - Classification result: {
+  "intent": "specific_fact_lookup",
+  "keywords": [
+    "Cabometyx"
+  ],
+  "question_is_graph_suitable": true,
+  "themes": [
+    "Indication/Population Description"
+  ]
+}
+2025-08-04 20:40:48,499 - [INFO] - [src.planner.tool_planner:67] - Planning tools for intent 'specific_fact_lookup' and persona 'clinical_analyst'
+2025-08-04 20:40:48,499 - [INFO] - [src.planner.tool_planner:110] - Coverage threshold of 0.85 met. Finalizing plan.
+2025-08-04 20:40:48,499 - [INFO] - [src.planner.tool_planner:113] - Generated tool plan: ['{\n  "tool_name": "query_knowledge_graph",\n  "estimated_coverage": 0.81\n}', '{\n  "tool_name": "vector_search",\n  "estimated_coverage": 0.5\n}']
+2025-08-04 20:40:48,499 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'query_knowledge_graph'
+2025-08-04 20:40:49,731 - [INFO] - [src.tools.retrievers:134] - Generated Cypher: MATCH p=(trade_name:Entity)<-[r:HASTRADENAME]-(drug:Entity)-[:HASINDICATION]->(indication:Entity) WHERE trade_name.name_normalized = 'cabometyx' RETURN p, properties(r) as rel_props
+2025-08-04 20:40:49,947 - [INFO] - [src.tools.retrievers:23] - [TIMER] Tool: query_knowledge_graph took 1447.91 ms
+2025-08-04 20:40:49,947 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'vector_search'
+2025-08-04 20:40:49,947 - [INFO] - [src.tools.retrievers:89] - Applying metadata filter: {'semantic_purpose': {'$in': ['Indication/Population Description']}}
+2025-08-04 20:40:50,559 - [INFO] - [src.tools.retrievers:23] - [TIMER] Tool: vector_search took 611.36 ms
+2025-08-04 20:40:50,559 - [INFO] - [src.agent:46] - [TIMER] Single RAG Step for 'What is the indication for the...' took 2710.37 ms
+2025-08-04 20:40:50,559 - [INFO] - [src.agent:46] - [TIMER] Full Agent Run took 4440.06 ms
+2025-08-04 20:41:02,467 - [INFO] - [src.planner.query_rewriter:63] - Query deemed standalone. Bypassing LLM rewrite. Query: 'Which sponsors made submissions in both the March 2025 and July 2025 meetings?'
+2025-08-04 20:41:03,491 - [INFO] - [src.planner.persona_classifier:61] - Query classified for persona: 'regulatory_specialist'
+2025-08-04 20:41:04,505 - [INFO] - [src.agent:46] - [TIMER] Decomposition took 1013.46 ms
+2025-08-04 20:41:04,505 - [INFO] - [src.agent:190] - Executing multi-step plan for query: 'Which sponsors made submissions in both the March 2025 and July 2025 meetings?'
+2025-08-04 20:41:04,505 - [INFO] - [src.planner.query_classifier:37] - Classifying query: Which sponsors made submissions in the March 2025 meetings?
+2025-08-04 20:41:04,505 - [INFO] - [src.planner.query_classifier:37] - Classifying query: Which sponsors made submissions in the July 2025 meetings?
+2025-08-04 20:41:05,251 - [INFO] - [src.planner.query_classifier:50] - Classification result: {
+  "intent": "specific_fact_lookup",
+  "keywords": [
+    "sponsors",
+    "submissions",
+    "March 2025 meetings"
+  ],
+  "question_is_graph_suitable": true,
+  "themes": [
+    "Regulatory History"
+  ]
+}
+2025-08-04 20:41:05,252 - [INFO] - [src.planner.tool_planner:67] - Planning tools for intent 'specific_fact_lookup' and persona 'regulatory_specialist'
+2025-08-04 20:41:05,252 - [INFO] - [src.planner.tool_planner:110] - Coverage threshold of 0.85 met. Finalizing plan.
+2025-08-04 20:41:05,252 - [INFO] - [src.planner.tool_planner:113] - Generated tool plan: ['{\n  "tool_name": "query_knowledge_graph",\n  "estimated_coverage": 0.81\n}', '{\n  "tool_name": "vector_search",\n  "estimated_coverage": 0.5\n}']
+2025-08-04 20:41:05,252 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'query_knowledge_graph'
+2025-08-04 20:41:06,332 - [INFO] - [src.tools.retrievers:134] - Generated Cypher: MATCH p=(drug:Entity)-[r:HASSPONSOR]->(sponsor:Entity) WHERE r.doc_id CONTAINS 'March-2025' RETURN p, properties(r) as rel_props
+2025-08-04 20:41:06,779 - [INFO] - [src.tools.retrievers:23] - [TIMER] Tool: query_knowledge_graph took 1527.08 ms
+2025-08-04 20:41:06,779 - [INFO] - [src.agent:103] - Knowledge Graph provided a definitive answer. Bypassing vector search and re-ranking.
+2025-08-04 20:41:07,269 - [INFO] - [src.planner.query_classifier:50] - Classification result: {
+  "intent": "specific_fact_lookup",
+  "keywords": [
+    "sponsors",
+    "submissions",
+    "July 2025 meetings"
+  ],
+  "question_is_graph_suitable": true,
+  "themes": [
+    "Regulatory History"
+  ]
+}
+2025-08-04 20:41:07,269 - [INFO] - [src.planner.tool_planner:67] - Planning tools for intent 'specific_fact_lookup' and persona 'regulatory_specialist'
+2025-08-04 20:41:07,269 - [INFO] - [src.planner.tool_planner:110] - Coverage threshold of 0.85 met. Finalizing plan.
+2025-08-04 20:41:07,269 - [INFO] - [src.planner.tool_planner:113] - Generated tool plan: ['{\n  "tool_name": "query_knowledge_graph",\n  "estimated_coverage": 0.81\n}', '{\n  "tool_name": "vector_search",\n  "estimated_coverage": 0.5\n}']
+2025-08-04 20:41:07,269 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'query_knowledge_graph'
+2025-08-04 20:41:07,550 - [INFO] - [src.agent:46] - [TIMER] Synthesis LLM Call (Flash) took 770.75 ms
+2025-08-04 20:41:07,550 - [INFO] - [src.agent:46] - [TIMER] Single RAG Step for 'Which sponsors made submission...' took 3045.29 ms
+2025-08-04 20:41:09,548 - [INFO] - [src.tools.retrievers:134] - Generated Cypher: 
+MATCH p=(drug:Entity)-[r:HASSPONSOR]->(sponsor:Entity) WHERE r.doc_id CONTAINS 'July 2025' RETURN p, properties(r) as rel_props
+
+2025-08-04 20:41:09,761 - [INFO] - [src.tools.retrievers:23] - [TIMER] Tool: query_knowledge_graph took 2492.18 ms
+2025-08-04 20:41:09,761 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'vector_search'
+2025-08-04 20:41:09,761 - [INFO] - [src.tools.retrievers:89] - Applying metadata filter: {'semantic_purpose': {'$in': ['Regulatory History']}}
+2025-08-04 20:41:10,363 - [INFO] - [src.tools.retrievers:23] - [TIMER] Tool: vector_search took 601.36 ms
+2025-08-04 20:41:11,311 - [INFO] - [src.agent:79] - Re-ranked 10 snippets down to 5 using Gemini.
+2025-08-04 20:41:11,311 - [INFO] - [src.agent:46] - [TIMER] Re-ranking with Gemini took 948.27 ms
+2025-08-04 20:41:12,920 - [INFO] - [src.agent:46] - [TIMER] Synthesis LLM Call (Flash) took 1609.21 ms
+2025-08-04 20:41:12,921 - [INFO] - [src.agent:46] - [TIMER] Single RAG Step for 'Which sponsors made submission...' took 8415.03 ms
+2025-08-04 20:41:17,310 - [INFO] - [src.agent:46] - [TIMER] Reasoning Synthesis LLM Call (Pro) took 4388.98 ms
+2025-08-04 20:41:17,310 - [INFO] - [src.agent:46] - [TIMER] Full Agent Run took 14842.78 ms
+  Stopping...

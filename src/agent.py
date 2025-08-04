@@ -17,7 +17,7 @@ from src.planner.tool_planner import ToolPlanner
 from src.planner.persona_classifier import PersonaClassifier
 from src.planner.query_rewriter import QueryRewriter
 from src.router.tool_router import ToolRouter
-from src.prompts import DECOMPOSITION_PROMPT, REASONING_SYNTHESIS_PROMPT, DIRECT_SYNTHESIS_PROMPT, RERANKING_PROMPT
+from src.prompts import DECOMPOSITION_PROMPT, REASONING_SYNTHESIS_PROMPT, DIRECT_SYNTHESIS_PROMPT, RERANKING_PROMPT, SUMMARIZATION_PROMPT
 
 logger = logging.getLogger(__name__)
 LOG_PATH = Path("trace_logs.jsonl")
@@ -90,21 +90,45 @@ class Agent:
             tool_plan = self.planner.plan(query_meta, persona)
             if not tool_plan: return "I don't have a strategy for this query.", query_meta, [], []
 
-            with ThreadPoolExecutor(max_workers=len(tool_plan)) as executor:
-                futures = [executor.submit(self.router.execute_tool, item.tool_name, query, query_meta) for item in tool_plan]
-                results = [future.result() for future in futures]
+            # --- START OF DEFINITIVE FIX: Intelligent Tool Flow ---
+            
+            # Prioritize the Knowledge Graph if it's suitable and planned
+            final_results = []
+            kg_success = False
+            if query_meta.question_is_graph_suitable and any(t.tool_name == "query_knowledge_graph" for t in tool_plan):
+                kg_result = self.router.execute_tool("query_knowledge_graph", query, query_meta)
+                final_results.append(kg_result)
+                # If the KG finds a definitive answer, we can often stop here.
+                if kg_result.success and kg_result.content.strip():
+                    logger.info("Knowledge Graph provided a definitive answer. Bypassing vector search and re-ranking.")
+                    kg_success = True
+
+            # Run vector search only if the KG failed or wasn't suitable
+            if not kg_success:
+                if any(t.tool_name == "vector_search" for t in tool_plan):
+                    vector_result = self.router.execute_tool("vector_search", query, query_meta)
+                    final_results.append(vector_result)
+
+            # --- END OF DEFINITIVE FIX ---
 
             all_docs = []
-            for res in results:
+            for res in final_results:
                 if res and res.success and res.content.strip():
                     all_docs.extend(res.content.split("\n---\n"))
 
             if not all_docs:
-                return "I searched but could not find any relevant details.", query_meta, tool_plan, results
+                return "I searched but could not find any relevant details.", query_meta, tool_plan, final_results
 
-            ranked_docs = self._rerank_with_gemini(query, all_docs)
+            # --- START OF DEFINITIVE FIX: Conditional Re-ranking ---
+            # Only re-rank if we didn't get a golden answer from the KG
+            if not kg_success:
+                ranked_docs = self._rerank_with_gemini(query, all_docs)
+            else:
+                ranked_docs = all_docs # Use the direct KG results
+            # --- END OF DEFINITIVE FIX ---
+
             if not ranked_docs:
-                return "I found some information, but it did not seem relevant.", query_meta, tool_plan, results
+                return "I found some information, but it did not seem relevant.", query_meta, tool_plan, final_results
 
             evidence_texts, citation_links = [], []
             for doc in ranked_docs:
@@ -114,29 +138,33 @@ class Agent:
                     citation_links.append(parts[1])
 
             formatted_context = "\n\n".join([f"EVIDENCE [{i+1}]:\n{text}" for i, text in enumerate(evidence_texts)])
-            final_prompt = DIRECT_SYNTHESIS_PROMPT.format(question=query, context_str=formatted_context)
             
-            with Timer("Direct Synthesis LLM Call (Flash)"):
+            if query_meta.intent == "simple_summary":
+                final_prompt = SUMMARIZATION_PROMPT.format(context_str=formatted_context)
+            else:
+                final_prompt = DIRECT_SYNTHESIS_PROMPT.format(question=query, context_str=formatted_context)
+            
+            with Timer("Synthesis LLM Call (Flash)"):
                 response = self.synthesis_llm.generate_content(final_prompt, request_options=DEFAULT_REQUEST_OPTIONS)
             answer_text = response.text.strip()
-
-            used_indices = {int(m) - 1 for m in re.findall(r'\[(\d+)\]', answer_text)}
             
             final_response = answer_text
-            if used_indices:
-                references_section = "\n\n**References**\n"
-                unique_used_links = set()
-                used_links_ordered = []
-                for idx in sorted(list(used_indices)):
-                    if idx < len(citation_links):
-                        link = citation_links[idx]
-                        if link not in unique_used_links:
-                            unique_used_links.add(link)
-                            used_links_ordered.append(link)
-                references_section += "\n".join([f"{i+1}. {link}" for i, link in enumerate(used_links_ordered)])
-                final_response += references_section
+            if query_meta.intent != "simple_summary":
+                used_indices = {int(m) - 1 for m in re.findall(r'\[(\d+)\]', answer_text)}
+                if used_indices:
+                    references_section = "\n\n**References**\n"
+                    unique_used_links = set()
+                    used_links_ordered = []
+                    for idx in sorted(list(used_indices)):
+                        if idx < len(citation_links):
+                            link = citation_links[idx]
+                            if link not in unique_used_links:
+                                unique_used_links.add(link)
+                                used_links_ordered.append(link)
+                    references_section += "\n".join([f"{i+1}. {link}" for i, link in enumerate(used_links_ordered)])
+                    final_response += references_section
 
-            return final_response, query_meta, tool_plan, results
+            return final_response, query_meta, tool_plan, final_results
 
     def run(self, query: str, persona: str, chat_history: List[str]) -> str:
         run_start_time = time.perf_counter()
@@ -161,15 +189,37 @@ class Agent:
                 else:
                     logger.info(f"Executing multi-step plan for query: '{rewritten_query}'")
                     scratchpad = []
-                    with ThreadPoolExecutor(max_workers=len(plan)) as executor:
-                        sub_futures = [executor.submit(self._run_single_rag_step, sub_q, chosen_persona) for sub_q in plan]
+                    
+                    # --- START OF DEFINITIVE FIX: Smart Tool Execution ---
+                    
+                    # Identify which steps are for data retrieval vs. pure logic
+                    retrieval_steps = []
+                    logic_instruction = ""
+                    LOGIC_KEYWORDS = ["identify", "compare", "contrast", "common", "difference"]
+                    
+                    for sub_q in plan:
+                        if any(keyword in sub_q.lower() for keyword in LOGIC_KEYWORDS):
+                            logic_instruction = sub_q # This is the final instruction for the synthesizer
+                        else:
+                            retrieval_steps.append(sub_q)
+                    
+                    # Execute only the data retrieval steps in parallel
+                    with ThreadPoolExecutor(max_workers=len(retrieval_steps)) as executor:
+                        sub_futures = [executor.submit(self._run_single_rag_step, sub_q, chosen_persona) for sub_q in retrieval_steps]
                         sub_results_list = [future.result() for future in sub_futures]
                     
-                    for i, sub_q in enumerate(plan):
+                    # Build the scratchpad from the retrieval results
+                    for i, sub_q in enumerate(retrieval_steps):
                         sub_answer, _, _, sub_tool_results = sub_results_list[i]
-                        observation = f"Sub-Question: {sub_q}\nFinding: {sub_answer}"
+                        observation = f"Observation for the question '{sub_q}':\n{sub_answer}"
                         scratchpad.append(observation)
                         if sub_tool_results: final_tool_results.extend(sub_tool_results)
+
+                    # Add the final logical instruction to the scratchpad if it exists
+                    if logic_instruction:
+                        scratchpad.append(f"Final Instruction: {logic_instruction}")
+
+                    # --- END OF DEFINITIVE FIX ---
 
                     with Timer("Reasoning Synthesis LLM Call (Pro)"):
                         synthesis_prompt = REASONING_SYNTHESIS_PROMPT.format(question=rewritten_query, scratchpad="\n\n---\n\n".join(scratchpad))

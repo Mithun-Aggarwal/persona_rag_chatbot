@@ -1,5 +1,8 @@
 # FILE: src/tools/retrievers.py
-# V6.3 (Final Polish): Perfected page number formatting for a professional user experience.
+# V6.4 (Enhanced Schema Introspection): Upgrades the schema generation for the
+# Cypher prompt. It now dynamically fetches and includes relationship properties,
+# giving the LLM the necessary context to write correct queries that filter on
+# relationship attributes like date and source.
 
 import logging
 import time
@@ -13,6 +16,7 @@ from src.prompts import CYPHER_GENERATION_PROMPT
 
 logger = logging.getLogger(__name__)
 
+# ... (Timer class and _format_pinecone_results are unchanged) ...
 class Timer:
     def __init__(self, name): self.name = name
     def __enter__(self): self.start = time.perf_counter(); return self
@@ -49,8 +53,8 @@ def _format_pinecone_results(matches: List[dict]) -> List[str]:
         contents.append(f"Evidence from document: {text}\nCitation: {citation}")
     return contents
 
-# (The rest of the file is unchanged from the last working version)
 def _serialize_neo4j_path(record: Dict[str, Any]) -> str:
+    # ... (This function is unchanged) ...
     path_data, rel_props = record.get("p"), record.get("rel_props")
     if not path_data: return ""
     subject_name, predicate_type, object_name = None, None, None
@@ -74,6 +78,7 @@ def _serialize_neo4j_path(record: Dict[str, Any]) -> str:
         return ""
 
 def vector_search(query: str, query_meta: QueryMetadata) -> ToolResult:
+    # ... (This function is unchanged) ...
     tool_name = "vector_search"; namespace = "pbac-text"
     with Timer(f"Tool: {tool_name}"):
         pinecone_index = get_pinecone_index()
@@ -98,15 +103,38 @@ def query_knowledge_graph(query: str, query_meta: QueryMetadata) -> ToolResult:
         llm, driver = get_flash_model(), get_neo4j_driver()
         if not llm or not driver: return ToolResult(tool_name=tool_name, success=False, content="Clients not available.")
         try:
-            with driver.session() as session: schema_data = session.run("CALL db.schema.visualization()").data()
-            schema_str = f"Node labels: {schema_data[0]['nodes']}\nRelationships: {schema_data[0]['relationships']}"
+            with driver.session() as session:
+                nodes_schema = session.run("CALL db.schema.nodeTypeProperties()").data()
+                rels_schema = session.run("CALL db.schema.relTypeProperties()").data()
+
+            schema_str = "Node Properties:\n"
+            for node in nodes_schema:
+                # --- START OF DEFINITIVE FIX ---
+                # The correct key for the property name is 'propertyName'.
+                prop_name = node['propertyName']
+                prop_type = node['propertyTypes'][0] # It's a list, take the first
+                schema_str += f"- Label: {node['nodeLabels'][0]}, Properties: {prop_name}: {prop_type}\n"
+                # --- END OF DEFINITIVE FIX ---
+            
+            schema_str += "\nRelationship Properties:\n"
+            for rel in rels_schema:
+                rel_type = rel.get('relType', '').strip('`')
+                properties = rel.get('properties', [])
+                props_list = [f"{p['property']}: {p['type']}" for p in properties]
+                props_str = ", ".join(props_list)
+                schema_str += f"- (:Entity)-[:{rel_type} {{{props_str}}}]->(:Entity)\n"
+
             prompt = CYPHER_GENERATION_PROMPT.format(schema=schema_str, question=query)
             response = llm.generate_content(prompt, request_options=DEFAULT_REQUEST_OPTIONS)
             cypher_query = response.text.strip().replace("```cypher", "").replace("```", "")
-            if "none" in cypher_query.lower() or "match" not in cypher_query.lower(): return ToolResult(tool_name=tool_name, success=True, content="")
+            
+            if "none" in cypher_query.lower() or "match" not in cypher_query.lower(): 
+                return ToolResult(tool_name=tool_name, success=True, content="")
+                
             logger.info(f"Generated Cypher: {cypher_query}")
             with driver.session() as session: records = session.run(cypher_query).data()
             if not records: return ToolResult(tool_name=tool_name, success=True, content="")
+            
             results = [_serialize_neo4j_path(record) for record in records if record.get("p")]
             return ToolResult(tool_name=tool_name, success=True, content="\n".join(filter(None, results)))
         except Exception as e:

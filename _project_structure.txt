@@ -33,3 +33,4 @@ src/tools/clients.py
 src/tools/retrievers.py
 streamlit_app.py
 trace_logs.jsonl
+verify_pinecone.py

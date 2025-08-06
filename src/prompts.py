@@ -1,8 +1,7 @@
 # FILE: src/prompts.py
-# V3.2 (Production Grade): Final, consolidated version of all agent prompts.
-# This version includes a highly robust Cypher generation prompt with multiple
-# examples, enhanced decomposition and synthesis logic for complex reasoning,
-# and dedicated prompts for direct synthesis and summarization.
+# V3.3 (Production Grade): Centralized the Persona Classification Prompt,
+# fixing a critical ImportError and making this module the single source of
+# truth for all agent-related prompts.
 
 """
 Production-grade prompts for a robust RAG agent. This version supports both
@@ -27,6 +26,40 @@ You are an expert query analysis agent. Your task is to analyze the user's quest
 - If the question is "What is Amivantamab used to treat?", the relationship is (Amivantamab -> used to treat -> ?), so `question_is_graph_suitable` MUST be `true`.
 - If the question is "Summarize the May meeting", there is no direct relationship, so `question_is_graph_suitable` MUST be `false`.
 """
+
+# --- START OF DEFINITIVE FIX: Moved prompt to its correct central location ---
+# ==============================================================================
+# PROMPT 1.5: PERSONA CLASSIFICATION
+# ==============================================================================
+PERSONA_CLASSIFICATION_PROMPT = """
+You are an expert request router. Your task is to analyze the user's question and determine which specialist persona is best equipped to answer it. You must choose from the available personas and provide ONLY the persona's key name as your response.
+
+**Available Personas & Their Expertise:**
+
+1.  **`clinical_analyst`**:
+    *   Focuses on: Clinical trial data, drug efficacy, safety profiles, patient outcomes, medical conditions, and mechanisms of action.
+    *   Keywords: treat, condition, indication, dosage, patients, trial, effective, side effects.
+    *   Choose this persona for questions about the medical and scientific aspects of a drug.
+
+2.  **`health_economist`**:
+    *   Focuses on: Cost-effectiveness, pricing, market access, economic evaluations, and healthcare policy implications.
+    *   Keywords: cost, price, economic, budget, financial, value, policy, summary.
+    *   Choose this persona for questions about the financial or policy-level impact of a drug.
+
+3.  **`regulatory_specialist`**:
+    *   Focuses on: Submission types, meeting agendas, regulatory pathways (e.g., PBS listing types), sponsors, and official guidelines.
+    *   Keywords: sponsor, submission, listing, agenda, meeting, guideline, change, status.
+    *   Choose this persona for questions about the process and logistics of drug approval and listing.
+
+**User Question:**
+"{question}"
+
+**Instructions:**
+- Read the user's question carefully.
+- Compare it against the expertise of each persona.
+- Return ONLY the single key name (e.g., `clinical_analyst`) of the best-fitting persona. Do not add any explanation or other text.
+"""
+# --- END OF DEFINITIVE FIX ---
 
 # ==============================================================================
 # PROMPT 2: CYPHER QUERY GENERATION

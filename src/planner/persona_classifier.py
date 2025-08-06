@@ -1,68 +1,64 @@
 # FILE: src/planner/persona_classifier.py
-# V1.1 (Resilience Fix): Added request_options to the generate_content call.
+# V2.1 (Final Production Grade): Completes the prompt centralization refactoring.
+# This file now correctly imports the PERSONA_CLASSIFICATION_PROMPT from the
+# central `src.prompts` module, making the system more maintainable and robust.
 
 import logging
-from typing import Literal
-# --- DEFINITIVE FIX: Import the config and model getter ---
+from typing import Literal, Optional
+
+from google.api_core import exceptions as google_exceptions
 from src.tools.clients import get_flash_model, DEFAULT_REQUEST_OPTIONS
+# --- START OF DEFINITIVE FIX: Import from the central prompts module ---
+from src.prompts import PERSONA_CLASSIFICATION_PROMPT
+# --- END OF DEFINITIVE FIX ---
+
 
 logger = logging.getLogger(__name__)
 
 Persona = Literal["clinical_analyst", "health_economist", "regulatory_specialist"]
 
-PERSONA_CLASSIFICATION_PROMPT = """
-You are an expert request router. Your task is to analyze the user's question and determine which specialist persona is best equipped to answer it. You must choose from the available personas and provide ONLY the persona's key name as your response.
-
-**Available Personas & Their Expertise:**
-
-1.  **`clinical_analyst`**:
-    *   Focuses on: Clinical trial data, drug efficacy, safety profiles, patient outcomes, medical conditions, and mechanisms of action.
-    *   Keywords: treat, condition, indication, dosage, patients, trial, effective, side effects.
-    *   Choose this persona for questions about the medical and scientific aspects of a drug.
-
-2.  **`health_economist`**:
-    *   Focuses on: Cost-effectiveness, pricing, market access, economic evaluations, and healthcare policy implications.
-    *   Keywords: cost, price, economic, budget, financial, value, policy, summary.
-    *   Choose this persona for questions about the financial or policy-level impact of a drug.
-
-3.  **`regulatory_specialist`**:
-    *   Focuses on: Submission types, meeting agendas, regulatory pathways (e.g., PBS listing types), sponsors, and official guidelines.
-    *   Keywords: sponsor, submission, listing, agenda, meeting, guideline, change, status.
-    *   Choose this persona for questions about the process and logistics of drug approval and listing.
-
-**User Question:**
-"{question}"
-
-**Instructions:**
-- Read the user's question carefully.
-- Compare it against the expertise of each persona.
-- Return ONLY the single key name (e.g., `clinical_analyst`) of the best-fitting persona. Do not add any explanation or other text.
-"""
 
 class PersonaClassifier:
     def __init__(self):
-        # --- DEFINITIVE FIX: Use the new centralized model getter ---
         self.llm = get_flash_model()
         if not self.llm:
             logger.error("FATAL: Gemini client not initialized, PersonaClassifier will not work.")
 
-    def classify(self, query: str) -> Persona:
-        """Classifies the query and returns the most appropriate persona key."""
+    def _call_llm_with_retry(self, prompt: str) -> Optional[str]:
+        """A wrapper for generate_content that handles API retries and timeouts gracefully."""
         if not self.llm:
-            return "regulatory_specialist" # A safe default
-
+            logger.error("LLM model for PersonaClassifier is not available.")
+            return None
         try:
-            prompt = PERSONA_CLASSIFICATION_PROMPT.format(question=query)
-            # --- DEFINITIVE FIX: Add request_options to the call ---
             response = self.llm.generate_content(prompt, request_options=DEFAULT_REQUEST_OPTIONS)
-            persona_key = response.text.strip()
-
-            if persona_key in ["clinical_analyst", "health_economist", "regulatory_specialist"]:
-                logger.info(f"Query classified for persona: '{persona_key}'")
-                return persona_key
-            else:
-                logger.warning(f"Persona classification returned an invalid key: '{persona_key}'. Falling back to default.")
-                return "regulatory_specialist"
+            return response.text
+        except google_exceptions.RetryError as e:
+            logger.error(f"PersonaClassifier API call timed out after multiple retries: {e}")
+            return None # Return None to signal a recoverable failure
         except Exception as e:
-            logger.error(f"Persona classification failed: {e}", exc_info=True)
-            return "regulatory_specialist" # Fallback on error
+            logger.error(f"An unexpected error occurred during PersonaClassifier LLM call: {e}", exc_info=True)
+            return None
+
+    def classify(self, query: str) -> Optional[Persona]:
+        """
+        Classifies the query and returns the most appropriate persona key.
+        Returns None if the API call fails irrecoverably.
+        """
+        if not self.llm:
+            return "regulatory_specialist"
+
+        prompt = PERSONA_CLASSIFICATION_PROMPT.format(question=query)
+        persona_key_text = self._call_llm_with_retry(prompt)
+        
+        if persona_key_text is None:
+            # API call failed after retries, signal this to the agent
+            return None 
+            
+        persona_key = persona_key_text.strip()
+
+        if persona_key in ["clinical_analyst", "health_economist", "regulatory_specialist"]:
+            logger.info(f"Query classified for persona: '{persona_key}'")
+            return persona_key
+        else:
+            logger.warning(f"Persona classification returned an invalid key: '{persona_key}'. Falling back to default.")
+            return "regulatory_specialist"

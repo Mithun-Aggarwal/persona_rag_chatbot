@@ -40,7 +40,7 @@ if "messages" not in st.session_state:
 if "current_persona" not in st.session_state:
     st.session_state.current_persona = "automatic"
 
-# --- Helper Functions (unchanged) ---
+# --- Helper Functions ---
 @st.cache_resource
 def initialize_agent():
     if not get_google_ai_client():
@@ -61,7 +61,7 @@ def reset_chat(persona_name: str):
         {"role": "assistant", "content": f"Hi! I'm now acting in **{display_name}** mode. How can I help you?"}
     ]
 
-# --- Sidebar (unchanged) ---
+# --- Sidebar ---
 with st.sidebar:
     st.header("🤖 Persona RAG Chatbot")
     st.markdown("Select a persona to tailor my retrieval strategy and answers to your specific role.")
@@ -132,7 +132,7 @@ with st.sidebar:
             if st.button(q, key=q, use_container_width=True):
                 st.session_state.run_prompt = q
 
-# --- Main Chat Interface (unchanged) ---
+# --- Main Chat Interface ---
 st.title("Persona-Aware RAG Agent")
 if st.session_state.current_persona == "automatic":
     st.caption("Currently in **Automatic Mode** (selects best persona per query)")
@@ -179,7 +179,6 @@ if prompt:
                 
                 # --- START OF DEFINITIVE FIX ---
                 # REMOVED asyncio.run() as agent.run is now a synchronous function.
-                # This was the cause of the ValueError crash.
                 response = st.session_state.agent.run(
                     prompt, 
                     persona=st.session_state.current_persona,

@@ -2,7 +2,7 @@
 # V2.0 (Performance Fix): Added a heuristic check to bypass the LLM call for non-conversational queries.
 
 import logging
-from typing import List
+from typing import List, Optional
 # --- DEFINITIVE FIX: Import the config and model getter ---
 from src.tools.clients import get_flash_model, DEFAULT_REQUEST_OPTIONS
 
@@ -45,39 +45,53 @@ You are an expert query analyst. Your task is to rewrite a user's latest questio
 
 class QueryRewriter:
     def __init__(self):
-        # --- DEFINITIVE FIX: Use the new centralized model getter ---
         self.llm = get_flash_model()
         if not self.llm:
             logger.error("FATAL: Gemini client not initialized, QueryRewriter will not work.")
 
+    # --- START OF DEFINITIVE FIX: Resilient LLM Call ---
+    def _call_llm_with_retry(self, prompt: str) -> Optional[str]:
+        """A wrapper for generate_content that handles API retries and timeouts gracefully."""
+        if not self.llm:
+            logger.error("LLM model for QueryRewriter is not available.")
+            return None
+        try:
+            response = self.llm.generate_content(prompt, request_options=DEFAULT_REQUEST_OPTIONS)
+            return response.text
+        except google_exceptions.RetryError as e:
+            logger.error(f"QueryRewriter API call timed out after multiple retries: {e}")
+            return None # Signal recoverable failure
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during QueryRewriter LLM call: {e}", exc_info=True)
+            return None
+    # --- END OF DEFINITIVE FIX ---
+
     def rewrite(self, query: str, chat_history: List[str]) -> str:
         """Rewrites a conversational query into a standalone query, with a performance-enhancing pre-check."""
         if not self.llm or not chat_history:
-            return query # If no history or no LLM, cannot rewrite.
+            return query
 
-        # --- DEFINITIVE FIX: Performance optimization ---
-        # Check if the query contains any conversational trigger words.
-        # This avoids a slow network call for the majority of queries which are already standalone.
         query_words = set(query.lower().split())
         if not CONVERSATIONAL_TRIGGERS.intersection(query_words):
             logger.info(f"Query deemed standalone. Bypassing LLM rewrite. Query: '{query}'")
             return query
-        # --- End of performance optimization ---
+        
+        formatted_history = "\n  - ".join(chat_history)
+        prompt = REWRITE_PROMPT.format(chat_history=formatted_history, question=query)
+        
+        # --- START OF DEFINITIVE FIX: Use the resilient wrapper ---
+        rewritten_query_text = self._call_llm_with_retry(prompt)
 
-        try:
-            formatted_history = "\n  - ".join(chat_history)
-            prompt = REWRITE_PROMPT.format(chat_history=formatted_history, question=query)
-            
-            # --- DEFINITIVE FIX: Add request_options to the call ---
-            response = self.llm.generate_content(prompt, request_options=DEFAULT_REQUEST_OPTIONS)
-            rewritten_query = response.text.strip()
-            
-            if rewritten_query:
-                logger.info(f"Original query: '{query}' -> Rewritten query: '{rewritten_query}'")
-                return rewritten_query
-            else:
-                logger.warning("Query rewrite resulted in an empty string. Using original query.")
-                return query
-        except Exception as e:
-            logger.error(f"Query rewriting failed: {e}", exc_info=True)
-            return query # Fallback to original query on error
+        if rewritten_query_text is None:
+            logger.warning("Query rewrite failed due to API issues. Using original query as fallback.")
+            return query # Fallback to original query on API failure
+
+        rewritten_query = rewritten_query_text.strip()
+        # --- END OF DEFINITIVE FIX ---
+        
+        if rewritten_query:
+            logger.info(f"Original query: '{query}' -> Rewritten query: '{rewritten_query}'")
+            return rewritten_query
+        else:
+            logger.warning("Query rewrite resulted in an empty string. Using original query.")
+            return query

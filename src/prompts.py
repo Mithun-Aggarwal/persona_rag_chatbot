@@ -1,7 +1,9 @@
 # FILE: src/prompts.py
-# V3.3 (Production Grade): Centralized the Persona Classification Prompt,
-# fixing a critical ImportError and making this module the single source of
-# truth for all agent-related prompts.
+# V3.7 (Definitive Fix):
+# 1. Corrected the Cypher syntax in CYPER_GENERATION_PROMPT to use the proper map
+#    projection operator `| properties(rel) {.*, type: type(rel)}` instead of the
+#    incorrect `+` operator. This resolves the CypherSyntaxError from Neo4j.
+# 2. This is the final fix to make the Knowledge Graph tool fully robust and operational.
 
 """
 Production-grade prompts for a robust RAG agent. This version supports both
@@ -27,7 +29,6 @@ You are an expert query analysis agent. Your task is to analyze the user's quest
 - If the question is "Summarize the May meeting", there is no direct relationship, so `question_is_graph_suitable` MUST be `false`.
 """
 
-# --- START OF DEFINITIVE FIX: Moved prompt to its correct central location ---
 # ==============================================================================
 # PROMPT 1.5: PERSONA CLASSIFICATION
 # ==============================================================================
@@ -59,10 +60,9 @@ You are an expert request router. Your task is to analyze the user's question an
 - Compare it against the expertise of each persona.
 - Return ONLY the single key name (e.g., `clinical_analyst`) of the best-fitting persona. Do not add any explanation or other text.
 """
-# --- END OF DEFINITIVE FIX ---
 
 # ==============================================================================
-# PROMPT 2: CYPHER QUERY GENERATION
+# PROMPT 2: CYPHER QUERY GENERATION (SYNTAX FIXED)
 # ==============================================================================
 CYPHER_GENERATION_PROMPT = """
 You are an expert Neo4j Cypher query developer. Your task is to convert a user's question into a single, valid, read-only Cypher query based on the provided graph schema and examples.
@@ -75,7 +75,7 @@ You are an expert Neo4j Cypher query developer. Your task is to convert a user's
 2.  **Construct a valid Cypher query** to find the answer. The query must be read-only.
 3.  **Always query against the `name_normalized` property for nodes** (e.g., `WHERE drug.name_normalized = 'abaloparatide'`).
 4.  **To filter by properties on a relationship, you MUST name the relationship in the MATCH clause** (e.g., `MATCH (d)-[r:HASSPONSOR]->(s)`) and then use it in the WHERE clause (e.g., `WHERE r.doc_id CONTAINS 'March-2025'`).
-5.  **Return Path and Properties:** Your `RETURN` clause must always be `RETURN p, properties(r) as rel_props`. The `r` must be the primary relationship in the path `p`.
+5.  **Return Path and All Relationship Properties:** Your `RETURN` clause must always be `RETURN p, [rel IN relationships(p) | rel {{.*, type: type(rel)}}] AS rel_props_list`. This uses the correct map projection syntax.
 6.  **Handle Failure:** If the question cannot be answered with a Cypher query from the schema, you MUST return the single word: `NONE`.
 7.  **Output ONLY the Cypher query or the word `NONE`.**
 
@@ -84,15 +84,15 @@ You are an expert Neo4j Cypher query developer. Your task is to convert a user's
 
 **# Example 1: Simple Fact Retrieval**
 Question: "What company sponsors Abaloparatide?"
-Cypher: MATCH p=(drug:Entity)-[r:HASSPONSOR]->(sponsor:Entity) WHERE drug.name_normalized = 'abaloparatide' RETURN p, properties(r) as rel_props
+Cypher: MATCH p=(drug:Entity)-[r:HASSPONSOR]->(sponsor:Entity) WHERE drug.name_normalized = 'abaloparatide' RETURN p, [rel IN relationships(p) | rel {{.*, type: type(rel)}}] AS rel_props_list
 
 **# Example 2: Multi-Hop / "Bridge" Query**
 Question: "What is the indication for the drug whose trade name is Cabometyx?"
-Cypher: MATCH p=(trade_name:Entity)<-[r:HASTRADENAME]-(drug:Entity)-[:HASINDICATION]->(indication:Entity) WHERE trade_name.name_normalized = 'cabometyx' RETURN p, properties(r) as rel_props
+Cypher: MATCH p=(trade_name:Entity)<-[:HASTRADENAME]-(drug:Entity)-[:HASINDICATION]->(indication:Entity) WHERE trade_name.name_normalized = 'cabometyx' RETURN p, [rel IN relationships(p) | rel {{.*, type: type(rel)}}] AS rel_props_list
 
 **# Example 3: Filtering by Relationship Property**
 Question: "List all sponsors who made submissions in the March 2025 PBAC meeting."
-Cypher: MATCH p=(drug:Entity)-[r:HASSPONSOR]->(sponsor:Entity) WHERE r.doc_id CONTAINS 'March-2025' RETURN p, properties(r) as rel_props
+Cypher: MATCH p=(drug:Entity)-[r:HASSPONSOR]->(sponsor:Entity) WHERE r.doc_id CONTAINS 'March-2025' RETURN p, [rel IN relationships(p) | rel {{.*, type: type(rel)}}] AS rel_props_list
 ---
 
 **Current Task:**
@@ -226,39 +226,65 @@ You are a professional medical and regulatory writer. Your task is to synthesize
 """
 
 # ==============================================================================
-# PROMPT 7: RE-RANKING
+# PROMPT 7 V2: RE-RANKING (IMPROVED AND STRICTER)
 # ==============================================================================
-RERANKING_PROMPT = """
-You are a highly intelligent and precise relevance-ranking model. Your task is to analyze a user's question and a list of retrieved documents, and then return a JSON list of the document indices that are most relevant for answering the question.
+RERANKING_PROMPT_V2 = """
+You are an expert fact-checking and relevance-ranking agent. Your task is to analyze a user's question and a list of retrieved documents. You must determine which documents contain a direct and explicit answer to the question.
 
 **CRITICAL INSTRUCTIONS:**
-1.  Read the user's question to understand their core intent.
-2.  Read each document, identified by its index (e.g., `DOCUMENT[0]`, `DOCUMENT[1]`).
-3.  Determine which documents contain direct, explicit information that helps answer the question.
-4.  Your output **MUST** be a single, valid JSON array of integers, representing the indices of the most relevant documents, sorted from most relevant to least relevant.
-5.  Include **ONLY** the indices of documents that are directly relevant. If a document is only tangentially related, do not include its index.
-6.  If **NO** documents are relevant, return an empty JSON array `[]`.
-7.  Do not include more than the top 5 most relevant document indices.
-
-**EXAMPLE:**
-- **User Question:** "What is the dosage form for Apomorphine?"
-- **Documents:**
-  DOCUMENT[0]:
-  Evidence from document: The sponsor for Apomorphine is STADA...
-  Citation: <a...>
-  
-  DOCUMENT[1]:
-  Evidence from document: Movapo® (apomorphine hydrochloride hemihydrate) is available as a solution for subcutaneous infusion...
-  Citation: <a...>
-  
-  DOCUMENT[2]:
-  Evidence from document: The PBAC recommended the listing of Abaloparatide...
-  Citation: <a...>
-
-- **Your JSON Output:**
-  [1]
+1.  **Analyze the User's Question:** Understand the specific fact or piece of information the user is asking for.
+2.  **Scrutinize Each Document:** Read each document (e.g., `DOCUMENT[0]`, `DOCUMENT[1]`) and determine if it **explicitly contains the answer**. Do not infer or assume.
+3.  **Prioritize Graph Evidence:** Snippets labeled "Evidence from graph:" are highly structured facts and should be considered very strong signals if they match the question's entities.
+4.  **Filter Aggressively:** Discard any document that is only topically related but does not contain the specific answer. For example, if the question is "What is the dosage?", a document mentioning the drug's sponsor is irrelevant.
+5.  **Output Format:** Your output **MUST** be a single, valid JSON object with one key: `"indices"`. The value must be an array of integers representing the indices of the documents that contain the answer, sorted from most to least definitive.
+6.  **Limit Results:** Return at most the top 5 most useful document indices.
+7.  **Handle No Answer:** If **NO** documents contain a direct answer, you **MUST** return `{{"indices": []}}`.
 
 ---
+**EXAMPLE 1: Clear Answer Found**
+
+*   **User Question:** "What is the indication for Cabometyx?"
+*   **Documents:**
+    DOCUMENT[0]:
+    Evidence from graph: CABOMETYX has trade name of CABOZANTINIB.
+    Citation: <a...>
+    
+    DOCUMENT[1]:
+    Evidence from document: The submission for Cabozantinib (Cabometyx) is for Pancreatic neuroendocrine tumors (PNET).
+    Citation: <a...>
+    
+    DOCUMENT[2]:
+    Evidence from document: The sponsor for Cabometyx is IPSEN PTY LTD.
+    Citation: <a...>
+
+*   **Your JSON Output:**
+    ```json
+    {{
+      "indices": [1]
+    }}
+    ```
+
+---
+**EXAMPLE 2: No Direct Answer**
+
+*   **User Question:** "What is the price of Tirzepatide?"
+*   **Documents:**
+    DOCUMENT[0]:
+    Evidence from document: Tirzepatide is indicated for the treatment of type 2 diabetes.
+    Citation: <a...>
+    
+    DOCUMENT[1]:
+    Evidence from document: The PBAC reviewed the submission for Tirzepatide from Eli Lilly.
+    Citation: <a...>
+
+*   **Your JSON Output:**
+    ```json
+    {{
+      "indices": []
+    }}
+    ```
+---
+
 **TASK:**
 
 **User Question:** "{question}"

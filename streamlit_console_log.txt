@@ -4,67 +4,44 @@
   Local URL: http://localhost:8502
   Network URL: http://192.168.20.19:8502
 
-2025-08-07 08:45:34,948 - [INFO] - [src.tools.clients:48] - Google AI client configured successfully.
-2025-08-07 08:45:34,948 - [INFO] - [src.tools.clients:65] - Requesting Flash Model: gemini-1.5-flash-latest
-2025-08-07 08:45:34,950 - [INFO] - [src.planner.tool_planner:58] - Successfully loaded persona-tool map from '/home/mit/persona_rag_chatbot/config/persona_tool_map.yml'.
-2025-08-07 08:45:34,950 - [INFO] - [src.router.tool_router:19] - ToolRouter initialized with 2 tools.
-2025-08-07 08:45:34,950 - [INFO] - [src.tools.clients:58] - Requesting GenerativeModel: gemini-1.5-pro-latest
-2025-08-07 08:45:34,950 - [INFO] - [src.tools.clients:65] - Requesting Flash Model: gemini-1.5-flash-latest
-2025-08-07 08:45:34,950 - [INFO] - [__main__:51] - Unified agent initialized successfully and cached for the session.
-2025-08-07 08:45:36,147 - [INFO] - [src.planner.query_rewriter:76] - Query deemed standalone. Bypassing LLM rewrite. Query: 'What company is the sponsor for Abaloparatide?'
-2025-08-07 08:45:36,725 - [INFO] - [src.planner.persona_classifier:60] - Query classified for persona: 'regulatory_specialist'
-2025-08-07 08:45:37,835 - [INFO] - [src.agent:50] - [TIMER] Decomposition took 1110.84 ms
-2025-08-07 08:45:37,836 - [INFO] - [src.agent:218] - Executing single-step plan for query: 'What company is the sponsor for Abaloparatide?'
-2025-08-07 08:45:37,836 - [INFO] - [src.planner.query_classifier:56] - Classifying query: What company is the sponsor for Abaloparatide?
-2025-08-07 08:45:38,592 - [INFO] - [src.planner.query_classifier:76] - Classification result: {
+2025-08-07 20:24:10,048 - [INFO] - [src.tools.clients:48] - Google AI client configured successfully.
+2025-08-07 20:24:10,049 - [INFO] - [src.tools.clients:65] - Requesting Flash Model: gemini-1.5-flash-latest
+2025-08-07 20:24:10,051 - [INFO] - [src.planner.tool_planner:58] - Successfully loaded persona-tool map from '/home/mit/persona_rag_chatbot/config/persona_tool_map.yml'.
+2025-08-07 20:24:10,051 - [INFO] - [src.router.tool_router:19] - ToolRouter initialized with 2 tools.
+2025-08-07 20:24:10,051 - [INFO] - [src.tools.clients:58] - Requesting GenerativeModel: gemini-1.5-pro-latest
+2025-08-07 20:24:10,051 - [INFO] - [src.tools.clients:65] - Requesting Flash Model: gemini-1.5-flash-latest
+2025-08-07 20:24:10,051 - [INFO] - [__main__:51] - Unified agent initialized successfully and cached for the session.
+2025-08-07 20:24:11,014 - [INFO] - [src.planner.query_rewriter:76] - Query deemed standalone. Bypassing LLM rewrite. Query: 'What company is the sponsor for Abaloparatide?'
+2025-08-07 20:24:12,581 - [INFO] - [src.planner.persona_classifier:60] - Query classified for persona: 'regulatory_specialist'
+2025-08-07 20:24:13,223 - [INFO] - [src.agent:57] - [TIMER] Decomposition took 642.00 ms
+2025-08-07 20:24:13,223 - [INFO] - [src.agent:230] - Executing single-step plan for query: 'What company is the sponsor for Abaloparatide?'
+2025-08-07 20:24:13,223 - [INFO] - [src.planner.query_classifier:56] - Classifying query: What company is the sponsor for Abaloparatide?
+2025-08-07 20:24:14,129 - [INFO] - [src.planner.query_classifier:76] - Classification result: {
   "intent": "specific_fact_lookup",
   "keywords": [
     "Abaloparatide",
-    "company",
-    "sponsor"
+    "sponsor",
+    "company"
   ],
   "question_is_graph_suitable": true,
   "themes": [
     "Drug/Therapy Description"
   ]
 }
-2025-08-07 08:45:38,592 - [INFO] - [src.planner.tool_planner:67] - Planning tools for intent 'specific_fact_lookup' and persona 'regulatory_specialist'
-2025-08-07 08:45:38,593 - [INFO] - [src.planner.tool_planner:110] - Coverage threshold of 0.85 met. Finalizing plan.
-2025-08-07 08:45:38,593 - [INFO] - [src.planner.tool_planner:113] - Generated tool plan: ['{\n  "tool_name": "query_knowledge_graph",\n  "estimated_coverage": 0.81\n}', '{\n  "tool_name": "vector_search",\n  "estimated_coverage": 0.5\n}']
-2025-08-07 08:45:38,593 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'query_knowledge_graph'
-2025-08-07 08:45:39,756 - [INFO] - [src.tools.clients:97] - Neo4j driver connected successfully.
-2025-08-07 08:45:40,979 - [INFO] - [src.tools.retrievers:152] - Generated Cypher: MATCH p=(drug:Entity)-[r:HASSPONSOR]->(sponsor:Entity) WHERE drug.name_normalized = 'abaloparatide' RETURN p, properties(r) as rel_props
-2025-08-07 08:45:41,188 - [INFO] - [src.tools.retrievers:23] - [TIMER] Tool: query_knowledge_graph took 2595.27 ms
-2025-08-07 08:45:41,188 - [INFO] - [src.agent:123] - Knowledge Graph provided a definitive answer. Bypassing vector search and re-ranking.
-2025-08-07 08:45:42,654 - [INFO] - [src.agent:50] - [TIMER] Synthesis LLM Call (Flash) took 1465.70 ms
-2025-08-07 08:45:42,654 - [INFO] - [src.agent:50] - [TIMER] Single RAG Step for 'What company is the sponsor fo...' took 4818.41 ms
-2025-08-07 08:45:42,654 - [INFO] - [src.agent:50] - [TIMER] Full Agent Run took 6507.56 ms
-2025-08-07 08:45:53,843 - [INFO] - [src.planner.query_rewriter:76] - Query deemed standalone. Bypassing LLM rewrite. Query: 'What is the indication for the drug whose trade name is Cabometyx?'
-2025-08-07 08:45:54,280 - [INFO] - [src.planner.persona_classifier:60] - Query classified for persona: 'clinical_analyst'
-2025-08-07 08:45:55,431 - [INFO] - [src.agent:50] - [TIMER] Decomposition took 1150.09 ms
-2025-08-07 08:45:55,431 - [INFO] - [src.agent:218] - Executing single-step plan for query: 'What is the indication for the drug whose trade name is Cabometyx?'
-2025-08-07 08:45:55,431 - [INFO] - [src.planner.query_classifier:56] - Classifying query: What is the indication for the drug whose trade name is Cabometyx?
-2025-08-07 08:45:56,096 - [INFO] - [src.planner.query_classifier:76] - Classification result: {
-  "intent": "specific_fact_lookup",
-  "keywords": [
-    "Cabometyx"
-  ],
-  "question_is_graph_suitable": true,
-  "themes": [
-    "Indication/Population Description"
-  ]
-}
-2025-08-07 08:45:56,097 - [INFO] - [src.planner.tool_planner:67] - Planning tools for intent 'specific_fact_lookup' and persona 'clinical_analyst'
-2025-08-07 08:45:56,097 - [INFO] - [src.planner.tool_planner:110] - Coverage threshold of 0.85 met. Finalizing plan.
-2025-08-07 08:45:56,097 - [INFO] - [src.planner.tool_planner:113] - Generated tool plan: ['{\n  "tool_name": "query_knowledge_graph",\n  "estimated_coverage": 0.81\n}', '{\n  "tool_name": "vector_search",\n  "estimated_coverage": 0.5\n}']
-2025-08-07 08:45:56,097 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'query_knowledge_graph'
-2025-08-07 08:45:57,211 - [INFO] - [src.tools.retrievers:152] - Generated Cypher: MATCH p=(trade_name:Entity)<-[r:HASTRADENAME]-(drug:Entity)-[:HASINDICATION]->(indication:Entity) WHERE trade_name.name_normalized = 'cabometyx' RETURN p, properties(r) as rel_props
-2025-08-07 08:45:57,530 - [INFO] - [src.tools.retrievers:23] - [TIMER] Tool: query_knowledge_graph took 1433.10 ms
-2025-08-07 08:45:57,530 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'vector_search'
-2025-08-07 08:45:58,711 - [INFO] - [src.tools.clients:79] - Pinecone index 'pbac-rag-index' connected successfully.
-2025-08-07 08:45:58,712 - [INFO] - [src.tools.retrievers:98] - Applying metadata filter: {'semantic_purpose': {'$in': ['Indication/Population Description']}}
-2025-08-07 08:46:00,274 - [INFO] - [src.tools.retrievers:23] - [TIMER] Tool: vector_search took 2743.98 ms
-2025-08-07 08:46:00,673 - [INFO] - [src.agent:103] - Re-ranked 2 snippets down to 0 using Gemini.
-2025-08-07 08:46:00,674 - [INFO] - [src.agent:50] - [TIMER] Re-ranking with Gemini took 399.44 ms
-2025-08-07 08:46:00,674 - [INFO] - [src.agent:50] - [TIMER] Single RAG Step for 'What is the indication for the...' took 5242.85 ms
-2025-08-07 08:46:00,674 - [INFO] - [src.agent:50] - [TIMER] Full Agent Run took 6831.00 ms
+2025-08-07 20:24:14,129 - [INFO] - [src.planner.tool_planner:67] - Planning tools for intent 'specific_fact_lookup' and persona 'regulatory_specialist'
+2025-08-07 20:24:14,129 - [INFO] - [src.planner.tool_planner:110] - Coverage threshold of 0.85 met. Finalizing plan.
+2025-08-07 20:24:14,129 - [INFO] - [src.planner.tool_planner:113] - Generated tool plan: ['{\n  "tool_name": "query_knowledge_graph",\n  "estimated_coverage": 0.81\n}', '{\n  "tool_name": "vector_search",\n  "estimated_coverage": 0.5\n}']
+2025-08-07 20:24:14,129 - [INFO] - [src.agent:129] - Query is suitable for Knowledge Graph. Executing KG tool first.
+2025-08-07 20:24:14,130 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'query_knowledge_graph'
+2025-08-07 20:24:15,301 - [INFO] - [src.tools.clients:97] - Neo4j driver connected successfully.
+2025-08-07 20:24:16,448 - [INFO] - [src.tools.retrievers:175] - Generated Cypher: MATCH p=(drug:Entity)-[r:HASSPONSOR]->(sponsor:Entity) WHERE drug.name_normalized = 'abaloparatide' RETURN p, [rel IN relationships(p) | rel {.*, type: type(rel)}] AS rel_props_list
+2025-08-07 20:24:16,821 - [INFO] - [src.tools.retrievers:25] - [TIMER] Tool: query_knowledge_graph took 2691.11 ms
+2025-08-07 20:24:16,821 - [INFO] - [src.agent:140] - Knowledge Graph did not provide an answer. Falling back to vector search.
+2025-08-07 20:24:16,821 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'vector_search'
+2025-08-07 20:24:18,032 - [INFO] - [src.tools.clients:79] - Pinecone index 'pbac-rag-index' connected successfully.
+2025-08-07 20:24:18,033 - [INFO] - [src.tools.retrievers:121] - Applying metadata filter: {'semantic_purpose': {'$in': ['Drug/Therapy Description']}}
+2025-08-07 20:24:20,107 - [INFO] - [src.tools.retrievers:25] - [TIMER] Tool: vector_search took 3285.60 ms
+2025-08-07 20:24:20,731 - [INFO] - [src.agent:112] - Re-ranked 10 snippets down to 0 using Gemini based on indices: [].
+2025-08-07 20:24:20,731 - [INFO] - [src.agent:57] - [TIMER] Re-ranking with Gemini took 624.55 ms
+2025-08-07 20:24:20,731 - [INFO] - [src.agent:57] - [TIMER] Single RAG Step for 'What company is the sponsor fo...' took 7508.28 ms
+2025-08-07 20:24:20,732 - [INFO] - [src.agent:57] - [TIMER] Full Agent Run took 9717.71 ms

@@ -1,5 +1,5 @@
 # FILE: config/models.yml
-# V2.0: Added Cohere re-ranker model configuration
+# V2.1: Updated comments to reflect the agent's use of Gemini for re-ranking.
 
 models:
   synthesis_pro: 'gemini-1.5-pro-latest'
@@ -7,8 +7,9 @@ models:
   classification: 'gemini-1.5-flash-latest'
   embedding: 'models/text-embedding-004'
 
-# --- NEW: Re-ranker Configuration ---
+# --- Re-ranker Configuration ---
+# NOTE: The agent currently uses a prompt-based re-ranking strategy with the
+# 'classification' model (gemini-1.5-flash-latest) specified above.
+# A dedicated re-ranker model could be a future performance enhancement.
 reranker:
-  # We will use Cohere's powerful re-rank model.
-  # Ensure you have a COHERE_API_KEY in your .env file.
-  model_name: "rerank-english-v3.0"
+  model_name: "gemini-1.5-flash-latest" # This is for reference; the agent code selects the model directly.

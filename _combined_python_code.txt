@@ -1,6 +1,6 @@
 ========================================================================
   Combined Python Files from Git Repository: /home/mit/persona_rag_chatbot
-  Generated on: Mon 04 Aug 2025 22:10:58 AEST
+  Generated on: Thu 07 Aug 2025 08:47:20 AEST
 ========================================================================
 
 
@@ -17,7 +17,13 @@
 ########################################################################
 
 # FILE: src/agent.py
-# V8.2 (Final Polish): Includes a corrected JSON parser and final presentation logic.
+# V10.1 (Final Production Architecture): Implements a robust, state-aware, and
+# strategic agent with graceful degradation and intelligent tool flow.
+# - Prioritizes the Knowledge Graph for suitable queries, bypassing vector search
+#   and re-ranking if a definitive answer is found. This fixes factual lookups.
+# - Uses ThreadPoolExecutor for efficient, parallel execution of sub-queries.
+# - Implements full resilience against transient API errors (e.g., 503 Overloaded).
+# - Corrected the ValueError on variable unpacking.
 
 import json
 import logging
@@ -25,9 +31,10 @@ import time
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor
 
+from google.api_core import exceptions as google_exceptions
 from src.tools.clients import get_generative_model, get_flash_model, DEFAULT_REQUEST_OPTIONS
 from src.models import ToolResult, QueryMetadata, ToolPlanItem
 from src.planner.query_classifier import QueryClassifier
@@ -40,10 +47,8 @@ from src.prompts import DECOMPOSITION_PROMPT, REASONING_SYNTHESIS_PROMPT, DIRECT
 logger = logging.getLogger(__name__)
 LOG_PATH = Path("trace_logs.jsonl")
 
-# --- DEFINITIVE FIX: Robust JSON Parser that handles objects AND arrays ---
 def extract_json_from_response(text: str) -> dict | list:
     """Finds and parses the first valid JSON object or array from a string."""
-    # Regex to find JSON wrapped in markdown, supporting both objects {} and arrays []
     match = re.search(r'```json\s*([\[\{].*?[\]\}])\s*```', text, re.DOTALL)
     if match:
         try:
@@ -51,11 +56,10 @@ def extract_json_from_response(text: str) -> dict | list:
         except json.JSONDecodeError:
             pass
     try:
-        # Fallback to parsing the entire string
         return json.loads(text)
     except json.JSONDecodeError:
         logger.warning(f"Could not parse JSON from response text: {text}")
-        return {} # Return empty dict on failure
+        return {}
 
 
 class Timer:
@@ -81,24 +85,41 @@ class Agent:
         self.llm = get_generative_model('gemini-1.5-pro-latest')
         self.synthesis_llm = get_flash_model('gemini-1.5-flash-latest')
         self.reranker_llm = get_flash_model('gemini-1.5-flash-latest')
+        
+    def _call_llm_with_retry(self, model, prompt: str) -> Optional[str]:
+        """A wrapper for generate_content that handles API retries and timeouts gracefully."""
+        if not model:
+            logger.error("LLM model is not available.")
+            return None
+        try:
+            response = model.generate_content(prompt, request_options=DEFAULT_REQUEST_OPTIONS)
+            return response.text
+        except google_exceptions.RetryError as e:
+            logger.error(f"API call timed out after multiple retries: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during LLM call: {e}", exc_info=True)
+            return None
 
     def _rerank_with_gemini(self, query: str, documents: List[str]) -> List[str]:
         if not self.reranker_llm or not documents: return documents
         formatted_docs = "\n\n".join([f"DOCUMENT[{i}]:\n{doc}" for i, doc in enumerate(documents)])
         prompt = RERANKING_PROMPT.format(question=query, documents=formatted_docs)
-        try:
-            with Timer("Re-ranking with Gemini"):
-                response = self.reranker_llm.generate_content(prompt, request_options=DEFAULT_REQUEST_OPTIONS)
-                best_indices = extract_json_from_response(response.text)
-                if not isinstance(best_indices, list):
-                    logger.warning("Gemini re-ranker did not return a list. Falling back.")
-                    return documents[:5]
-                reranked_docs = [documents[i] for i in best_indices if i < len(documents)]
-                logger.info(f"Re-ranked {len(documents)} snippets down to {len(reranked_docs)} using Gemini.")
-                return reranked_docs
-        except Exception as e:
-            logger.error(f"Gemini re-ranking failed: {e}. Falling back to top 5.", exc_info=False)
-            return documents[:5]
+        
+        with Timer("Re-ranking with Gemini"):
+            response_text = self._call_llm_with_retry(self.reranker_llm, prompt)
+            if response_text is None:
+                logger.warning("Gemini re-ranking failed due to API issues. Falling back to top 5.")
+                return documents[:5]
+
+            best_indices = extract_json_from_response(response_text)
+            if not isinstance(best_indices, list):
+                logger.warning("Gemini re-ranker did not return a list. Falling back.")
+                return documents[:5]
+            
+            reranked_docs = [documents[i] for i in best_indices if i < len(documents)]
+            logger.info(f"Re-ranked {len(documents)} snippets down to {len(reranked_docs)} using Gemini.")
+            return reranked_docs
 
     def _run_single_rag_step(self, query: str, persona: str) -> Tuple[str, QueryMetadata, List[ToolPlanItem], List[ToolResult]]:
         with Timer(f"Single RAG Step for '{query[:30]}...'"):
@@ -107,47 +128,44 @@ class Agent:
 
             tool_plan = self.planner.plan(query_meta, persona)
             if not tool_plan: return "I don't have a strategy for this query.", query_meta, [], []
-
-            # --- START OF DEFINITIVE FIX: Intelligent Tool Flow ---
             
-            # Prioritize the Knowledge Graph if it's suitable and planned
+            # --- START OF DEFINITIVE FIX: Intelligent, Conditional Tool Flow ---
             final_results = []
             kg_success = False
+            # Step 1: Prioritize the Knowledge Graph if it's suitable and planned
             if query_meta.question_is_graph_suitable and any(t.tool_name == "query_knowledge_graph" for t in tool_plan):
                 kg_result = self.router.execute_tool("query_knowledge_graph", query, query_meta)
                 final_results.append(kg_result)
-                # If the KG finds a definitive answer, we can often stop here.
-                if kg_result.success and kg_result.content.strip():
+                # Step 2: Evaluate the KG result. If it's a "golden" answer, we are done with retrieval.
+                if kg_result.success and kg_result.content and len(kg_result.content.strip()) > 10:
                     logger.info("Knowledge Graph provided a definitive answer. Bypassing vector search and re-ranking.")
                     kg_success = True
 
-            # Run vector search only if the KG failed or wasn't suitable
-            if not kg_success:
-                if any(t.tool_name == "vector_search" for t in tool_plan):
-                    vector_result = self.router.execute_tool("vector_search", query, query_meta)
-                    final_results.append(vector_result)
-
+            # Step 3: Fallback to Vector Search ONLY if the KG failed or wasn't suitable
+            if not kg_success and any(t.tool_name == "vector_search" for t in tool_plan):
+                vector_result = self.router.execute_tool("vector_search", query, query_meta)
+                final_results.append(vector_result)
             # --- END OF DEFINITIVE FIX ---
 
             all_docs = []
             for res in final_results:
-                if res and res.success and res.content.strip():
-                    all_docs.extend(res.content.split("\n---\n"))
+                if res and res.success and res.content and res.content.strip():
+                    splitter = "\n---\n" if res.tool_name == "vector_search" else "\n"
+                    all_docs.extend(res.content.split(splitter))
+            
+            all_docs = [doc for doc in all_docs if doc and doc.strip()]
 
             if not all_docs:
                 return "I searched but could not find any relevant details.", query_meta, tool_plan, final_results
 
-            # --- START OF DEFINITIVE FIX: Conditional Re-ranking ---
-            # Only re-rank if we didn't get a golden answer from the KG
             if not kg_success:
                 ranked_docs = self._rerank_with_gemini(query, all_docs)
             else:
-                ranked_docs = all_docs # Use the direct KG results
-            # --- END OF DEFINITIVE FIX ---
-
+                ranked_docs = all_docs
+                
             if not ranked_docs:
                 return "I found some information, but it did not seem relevant.", query_meta, tool_plan, final_results
-
+            
             evidence_texts, citation_links = [], []
             for doc in ranked_docs:
                 parts = doc.split("\nCitation: ")
@@ -158,15 +176,17 @@ class Agent:
             formatted_context = "\n\n".join([f"EVIDENCE [{i+1}]:\n{text}" for i, text in enumerate(evidence_texts)])
             
             if query_meta.intent == "simple_summary":
-                final_prompt = SUMMARIZATION_PROMPT.format(context_str=formatted_context)
+                synthesis_prompt = SUMMARIZATION_PROMPT.format(context_str=formatted_context)
             else:
-                final_prompt = DIRECT_SYNTHESIS_PROMPT.format(question=query, context_str=formatted_context)
+                synthesis_prompt = DIRECT_SYNTHESIS_PROMPT.format(question=query, context_str=formatted_context)
             
             with Timer("Synthesis LLM Call (Flash)"):
-                response = self.synthesis_llm.generate_content(final_prompt, request_options=DEFAULT_REQUEST_OPTIONS)
-            answer_text = response.text.strip()
+                answer_text = self._call_llm_with_retry(self.synthesis_llm, synthesis_prompt)
             
-            final_response = answer_text
+            if answer_text is None:
+                raise google_exceptions.RetryError("Synthesis LLM failed due to API overload.", cause=None)
+            
+            final_response = answer_text.strip()
             if query_meta.intent != "simple_summary":
                 used_indices = {int(m) - 1 for m in re.findall(r'\[(\d+)\]', answer_text)}
                 if used_indices:
@@ -190,13 +210,24 @@ class Agent:
         try:
             with Timer("Full Agent Run"):
                 rewritten_query = self.rewriter.rewrite(query, chat_history)
-                chosen_persona = self.persona_classifier.classify(rewritten_query) if persona == "automatic" else persona
+                
+                chosen_persona_key = self.persona_classifier.classify(rewritten_query)
+                if chosen_persona_key is None:
+                    logger.warning("Persona classification failed due to API error. Defaulting to 'regulatory_specialist'.")
+                    chosen_persona_key = "regulatory_specialist"
+                chosen_persona = chosen_persona_key if persona == "automatic" else persona
+
                 persona_display_name = " ".join(word.capitalize() for word in chosen_persona.split("_"))
                 
                 with Timer("Decomposition"):
                     decomp_prompt = DECOMPOSITION_PROMPT.format(chat_history="\n- ".join(chat_history), question=rewritten_query)
-                    decomp_response = self.synthesis_llm.generate_content(decomp_prompt, request_options=DEFAULT_REQUEST_OPTIONS)
-                    plan_data = extract_json_from_response(decomp_response.text)
+                    decomp_response_text = self._call_llm_with_retry(self.synthesis_llm, decomp_prompt)
+                
+                if decomp_response_text is None:
+                    logger.warning("Decomposition failed due to API error. Degrading to single-step plan.")
+                    plan_data = {"requires_decomposition": False, "plan": [rewritten_query]}
+                else:
+                    plan_data = extract_json_from_response(decomp_response_text)
 
                 requires_decomposition = plan_data.get("requires_decomposition", False)
                 plan = plan_data.get("plan", [rewritten_query])
@@ -208,47 +239,49 @@ class Agent:
                     logger.info(f"Executing multi-step plan for query: '{rewritten_query}'")
                     scratchpad = []
                     
-                    # --- START OF DEFINITIVE FIX: Smart Tool Execution ---
-                    
-                    # Identify which steps are for data retrieval vs. pure logic
                     retrieval_steps = []
                     logic_instruction = ""
-                    LOGIC_KEYWORDS = ["identify", "compare", "contrast", "common", "difference"]
+                    LOGIC_KEYWORDS = ["identify", "compare", "contrast", "common", "difference", "both"]
                     
                     for sub_q in plan:
                         if any(keyword in sub_q.lower() for keyword in LOGIC_KEYWORDS):
-                            logic_instruction = sub_q # This is the final instruction for the synthesizer
+                            logic_instruction = sub_q
                         else:
                             retrieval_steps.append(sub_q)
                     
-                    # Execute only the data retrieval steps in parallel
-                    with ThreadPoolExecutor(max_workers=len(retrieval_steps)) as executor:
+                    if not retrieval_steps and logic_instruction:
+                        retrieval_steps = plan
+
+                    with ThreadPoolExecutor(max_workers=len(retrieval_steps) or 1) as executor:
                         sub_futures = [executor.submit(self._run_single_rag_step, sub_q, chosen_persona) for sub_q in retrieval_steps]
                         sub_results_list = [future.result() for future in sub_futures]
                     
-                    # Build the scratchpad from the retrieval results
+                    # --- START OF DEFINITIVE FIX: Corrected result unpacking ---
                     for i, sub_q in enumerate(retrieval_steps):
+                        # The function returns 4 items, we need to unpack all of them
                         sub_answer, _, _, sub_tool_results = sub_results_list[i]
                         observation = f"Observation for the question '{sub_q}':\n{sub_answer}"
                         scratchpad.append(observation)
                         if sub_tool_results: final_tool_results.extend(sub_tool_results)
-
-                    # Add the final logical instruction to the scratchpad if it exists
-                    if logic_instruction:
-                        scratchpad.append(f"Final Instruction: {logic_instruction}")
-
                     # --- END OF DEFINITIVE FIX ---
+
+                    if logic_instruction and logic_instruction not in retrieval_steps:
+                        scratchpad.append(f"Final Instruction: {logic_instruction}")
 
                     with Timer("Reasoning Synthesis LLM Call (Pro)"):
                         synthesis_prompt = REASONING_SYNTHESIS_PROMPT.format(question=rewritten_query, scratchpad="\n\n---\n\n".join(scratchpad))
-                        synthesis_response = self.llm.generate_content(synthesis_prompt, request_options=DEFAULT_REQUEST_OPTIONS)
-                    synthesis_result = synthesis_response.text
-                
+                        synthesis_result = self._call_llm_with_retry(self.llm, synthesis_prompt)
+                        if synthesis_result is None:
+                           raise google_exceptions.RetryError("Final synthesis LLM failed due to API overload.", cause=None)
+
                 final_answer = f"Acting as a **{persona_display_name}**, here is what I found:\n\n{synthesis_result}" if persona == "automatic" else synthesis_result
                 return final_answer
+        except google_exceptions.RetryError as e:
+            logger.error(f"A recoverable API error occurred and timed out: {e}", exc_info=False)
+            return "I'm sorry, the AI models I rely on are currently experiencing high traffic. Please try your question again in a few moments."
         except Exception as e:
             logger.error(f"An unexpected error occurred during agent run: {e}", exc_info=True)
-            return "I encountered a critical error. Please check the system logs."
+            return "I encountered a critical error processing your request. Please check the system logs for more details."
         finally:
             run_end_time = time.perf_counter()
             log_trace(query, persona, final_query_meta, final_tool_plan, final_tool_results, final_answer, run_end_time - run_start_time)
@@ -393,73 +426,69 @@ class RetrievalPlan(BaseModel):
 ########################################################################
 
 # FILE: src/planner/persona_classifier.py
-# V1.1 (Resilience Fix): Added request_options to the generate_content call.
+# V2.1 (Final Production Grade): Completes the prompt centralization refactoring.
+# This file now correctly imports the PERSONA_CLASSIFICATION_PROMPT from the
+# central `src.prompts` module, making the system more maintainable and robust.
 
 import logging
-from typing import Literal
-# --- DEFINITIVE FIX: Import the config and model getter ---
+from typing import Literal, Optional
+
+from google.api_core import exceptions as google_exceptions
 from src.tools.clients import get_flash_model, DEFAULT_REQUEST_OPTIONS
+# --- START OF DEFINITIVE FIX: Import from the central prompts module ---
+from src.prompts import PERSONA_CLASSIFICATION_PROMPT
+# --- END OF DEFINITIVE FIX ---
+
 
 logger = logging.getLogger(__name__)
 
 Persona = Literal["clinical_analyst", "health_economist", "regulatory_specialist"]
 
-PERSONA_CLASSIFICATION_PROMPT = """
-You are an expert request router. Your task is to analyze the user's question and determine which specialist persona is best equipped to answer it. You must choose from the available personas and provide ONLY the persona's key name as your response.
-
-**Available Personas & Their Expertise:**
-
-1.  **`clinical_analyst`**:
-    *   Focuses on: Clinical trial data, drug efficacy, safety profiles, patient outcomes, medical conditions, and mechanisms of action.
-    *   Keywords: treat, condition, indication, dosage, patients, trial, effective, side effects.
-    *   Choose this persona for questions about the medical and scientific aspects of a drug.
-
-2.  **`health_economist`**:
-    *   Focuses on: Cost-effectiveness, pricing, market access, economic evaluations, and healthcare policy implications.
-    *   Keywords: cost, price, economic, budget, financial, value, policy, summary.
-    *   Choose this persona for questions about the financial or policy-level impact of a drug.
-
-3.  **`regulatory_specialist`**:
-    *   Focuses on: Submission types, meeting agendas, regulatory pathways (e.g., PBS listing types), sponsors, and official guidelines.
-    *   Keywords: sponsor, submission, listing, agenda, meeting, guideline, change, status.
-    *   Choose this persona for questions about the process and logistics of drug approval and listing.
-
-**User Question:**
-"{question}"
-
-**Instructions:**
-- Read the user's question carefully.
-- Compare it against the expertise of each persona.
-- Return ONLY the single key name (e.g., `clinical_analyst`) of the best-fitting persona. Do not add any explanation or other text.
-"""
 
 class PersonaClassifier:
     def __init__(self):
-        # --- DEFINITIVE FIX: Use the new centralized model getter ---
         self.llm = get_flash_model()
         if not self.llm:
             logger.error("FATAL: Gemini client not initialized, PersonaClassifier will not work.")
 
-    def classify(self, query: str) -> Persona:
-        """Classifies the query and returns the most appropriate persona key."""
+    def _call_llm_with_retry(self, prompt: str) -> Optional[str]:
+        """A wrapper for generate_content that handles API retries and timeouts gracefully."""
         if not self.llm:
-            return "regulatory_specialist" # A safe default
-
+            logger.error("LLM model for PersonaClassifier is not available.")
+            return None
         try:
-            prompt = PERSONA_CLASSIFICATION_PROMPT.format(question=query)
-            # --- DEFINITIVE FIX: Add request_options to the call ---
             response = self.llm.generate_content(prompt, request_options=DEFAULT_REQUEST_OPTIONS)
-            persona_key = response.text.strip()
-
-            if persona_key in ["clinical_analyst", "health_economist", "regulatory_specialist"]:
-                logger.info(f"Query classified for persona: '{persona_key}'")
-                return persona_key
-            else:
-                logger.warning(f"Persona classification returned an invalid key: '{persona_key}'. Falling back to default.")
-                return "regulatory_specialist"
+            return response.text
+        except google_exceptions.RetryError as e:
+            logger.error(f"PersonaClassifier API call timed out after multiple retries: {e}")
+            return None # Return None to signal a recoverable failure
         except Exception as e:
-            logger.error(f"Persona classification failed: {e}", exc_info=True)
-            return "regulatory_specialist" # Fallback on error
+            logger.error(f"An unexpected error occurred during PersonaClassifier LLM call: {e}", exc_info=True)
+            return None
+
+    def classify(self, query: str) -> Optional[Persona]:
+        """
+        Classifies the query and returns the most appropriate persona key.
+        Returns None if the API call fails irrecoverably.
+        """
+        if not self.llm:
+            return "regulatory_specialist"
+
+        prompt = PERSONA_CLASSIFICATION_PROMPT.format(question=query)
+        persona_key_text = self._call_llm_with_retry(prompt)
+        
+        if persona_key_text is None:
+            # API call failed after retries, signal this to the agent
+            return None 
+            
+        persona_key = persona_key_text.strip()
+
+        if persona_key in ["clinical_analyst", "health_economist", "regulatory_specialist"]:
+            logger.info(f"Query classified for persona: '{persona_key}'")
+            return persona_key
+        else:
+            logger.warning(f"Persona classification returned an invalid key: '{persona_key}'. Falling back to default.")
+            return "regulatory_specialist"
 
 
 ########################################################################
@@ -467,15 +496,17 @@ class PersonaClassifier:
 ########################################################################
 
 # FILE: src/planner/query_classifier.py
-# V1.4 (Final Fix): Corrected Pydantic model import and literal values.
+# V2.0 (Resilient Architecture): Refactored to use a centralized, resilient LLM
+# calling mechanism. Can now gracefully handle transient API errors (e.g., 503
+# Overloaded) by returning None, allowing the agent to terminate the run cleanly.
 
 import logging
 import json
 import re
 from typing import Optional
 
-# --- DEFINITIVE FIX: Import the correct model from src.models ---
-from src.models import QueryMetadata, QueryIntent
+from google.api_core import exceptions as google_exceptions
+from src.models import QueryMetadata
 from src.prompts import QUERY_CLASSIFICATION_PROMPT_V2 as QUERY_CLASSIFICATION_PROMPT
 from src.tools.clients import get_flash_model, DEFAULT_REQUEST_OPTIONS
 
@@ -500,16 +531,40 @@ class QueryClassifier:
     def __init__(self):
         self.model = get_flash_model()
 
+    # --- START OF DEFINITIVE FIX: Resilient LLM Call Helper ---
+    def _call_llm_with_retry(self, prompt: str) -> Optional[str]:
+        """A wrapper for generate_content that handles API retries and timeouts gracefully."""
+        if not self.model:
+            logger.error("LLM model for QueryClassifier is not available.")
+            return None
+        try:
+            response = self.model.generate_content(prompt, request_options=DEFAULT_REQUEST_OPTIONS)
+            return response.text
+        except google_exceptions.RetryError as e:
+            logger.error(f"QueryClassifier API call timed out after multiple retries: {e}")
+            return None # Signal recoverable failure
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during QueryClassifier LLM call: {e}", exc_info=True)
+            return None
+    # --- END OF DEFINITIVE FIX ---
+
     def classify(self, query: str) -> Optional[QueryMetadata]:
         if not self.model: return None
         logger.info(f"Classifying query: {query}")
+        
+        prompt = QUERY_CLASSIFICATION_PROMPT + f"\n\nUser Query: {query}"
+        
+        # --- START OF DEFINITIVE FIX: Use the resilient wrapper ---
+        response_text = self._call_llm_with_retry(prompt)
+        
+        if response_text is None:
+            logger.error("Query classification failed due to API issues.")
+            return None # Propagate the failure signal
+        # --- END OF DEFINITIVE FIX ---
+
         try:
-            prompt = QUERY_CLASSIFICATION_PROMPT + f"\n\nUser Query: {query}"
-            response = self.model.generate_content(prompt, request_options=DEFAULT_REQUEST_OPTIONS)
+            json_data = extract_json_from_response(response_text)
             
-            json_data = extract_json_from_response(response.text)
-            
-            # --- DEFINITIVE FIX: Ensure intent matches the allowed literals ---
             if "intent" in json_data and json_data["intent"] == "comparison":
                 json_data["intent"] = "comparative_analysis"
             
@@ -518,7 +573,8 @@ class QueryClassifier:
             logger.info(f"Classification result: {metadata.model_dump_json(indent=2)}")
             return metadata
         except Exception as e:
-            logger.error(f"Query classification failed: {e}", exc_info=True)
+            # This catches Pydantic validation errors or other unexpected issues
+            logger.error(f"Query classification failed on response data: {e}", exc_info=True)
             return None
 
 
@@ -530,7 +586,7 @@ class QueryClassifier:
 # V2.0 (Performance Fix): Added a heuristic check to bypass the LLM call for non-conversational queries.
 
 import logging
-from typing import List
+from typing import List, Optional
 # --- DEFINITIVE FIX: Import the config and model getter ---
 from src.tools.clients import get_flash_model, DEFAULT_REQUEST_OPTIONS
 
@@ -573,42 +629,56 @@ You are an expert query analyst. Your task is to rewrite a user's latest questio
 
 class QueryRewriter:
     def __init__(self):
-        # --- DEFINITIVE FIX: Use the new centralized model getter ---
         self.llm = get_flash_model()
         if not self.llm:
             logger.error("FATAL: Gemini client not initialized, QueryRewriter will not work.")
 
+    # --- START OF DEFINITIVE FIX: Resilient LLM Call ---
+    def _call_llm_with_retry(self, prompt: str) -> Optional[str]:
+        """A wrapper for generate_content that handles API retries and timeouts gracefully."""
+        if not self.llm:
+            logger.error("LLM model for QueryRewriter is not available.")
+            return None
+        try:
+            response = self.llm.generate_content(prompt, request_options=DEFAULT_REQUEST_OPTIONS)
+            return response.text
+        except google_exceptions.RetryError as e:
+            logger.error(f"QueryRewriter API call timed out after multiple retries: {e}")
+            return None # Signal recoverable failure
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during QueryRewriter LLM call: {e}", exc_info=True)
+            return None
+    # --- END OF DEFINITIVE FIX ---
+
     def rewrite(self, query: str, chat_history: List[str]) -> str:
         """Rewrites a conversational query into a standalone query, with a performance-enhancing pre-check."""
         if not self.llm or not chat_history:
-            return query # If no history or no LLM, cannot rewrite.
+            return query
 
-        # --- DEFINITIVE FIX: Performance optimization ---
-        # Check if the query contains any conversational trigger words.
-        # This avoids a slow network call for the majority of queries which are already standalone.
         query_words = set(query.lower().split())
         if not CONVERSATIONAL_TRIGGERS.intersection(query_words):
             logger.info(f"Query deemed standalone. Bypassing LLM rewrite. Query: '{query}'")
             return query
-        # --- End of performance optimization ---
+        
+        formatted_history = "\n  - ".join(chat_history)
+        prompt = REWRITE_PROMPT.format(chat_history=formatted_history, question=query)
+        
+        # --- START OF DEFINITIVE FIX: Use the resilient wrapper ---
+        rewritten_query_text = self._call_llm_with_retry(prompt)
 
-        try:
-            formatted_history = "\n  - ".join(chat_history)
-            prompt = REWRITE_PROMPT.format(chat_history=formatted_history, question=query)
-            
-            # --- DEFINITIVE FIX: Add request_options to the call ---
-            response = self.llm.generate_content(prompt, request_options=DEFAULT_REQUEST_OPTIONS)
-            rewritten_query = response.text.strip()
-            
-            if rewritten_query:
-                logger.info(f"Original query: '{query}' -> Rewritten query: '{rewritten_query}'")
-                return rewritten_query
-            else:
-                logger.warning("Query rewrite resulted in an empty string. Using original query.")
-                return query
-        except Exception as e:
-            logger.error(f"Query rewriting failed: {e}", exc_info=True)
-            return query # Fallback to original query on error
+        if rewritten_query_text is None:
+            logger.warning("Query rewrite failed due to API issues. Using original query as fallback.")
+            return query # Fallback to original query on API failure
+
+        rewritten_query = rewritten_query_text.strip()
+        # --- END OF DEFINITIVE FIX ---
+        
+        if rewritten_query:
+            logger.info(f"Original query: '{query}' -> Rewritten query: '{rewritten_query}'")
+            return rewritten_query
+        else:
+            logger.warning("Query rewrite resulted in an empty string. Using original query.")
+            return query
 
 
 ########################################################################
@@ -736,10 +806,9 @@ class ToolPlanner:
 ########################################################################
 
 # FILE: src/prompts.py
-# V3.2 (Production Grade): Final, consolidated version of all agent prompts.
-# This version includes a highly robust Cypher generation prompt with multiple
-# examples, enhanced decomposition and synthesis logic for complex reasoning,
-# and dedicated prompts for direct synthesis and summarization.
+# V3.3 (Production Grade): Centralized the Persona Classification Prompt,
+# fixing a critical ImportError and making this module the single source of
+# truth for all agent-related prompts.
 
 """
 Production-grade prompts for a robust RAG agent. This version supports both
@@ -764,6 +833,40 @@ You are an expert query analysis agent. Your task is to analyze the user's quest
 - If the question is "What is Amivantamab used to treat?", the relationship is (Amivantamab -> used to treat -> ?), so `question_is_graph_suitable` MUST be `true`.
 - If the question is "Summarize the May meeting", there is no direct relationship, so `question_is_graph_suitable` MUST be `false`.
 """
+
+# --- START OF DEFINITIVE FIX: Moved prompt to its correct central location ---
+# ==============================================================================
+# PROMPT 1.5: PERSONA CLASSIFICATION
+# ==============================================================================
+PERSONA_CLASSIFICATION_PROMPT = """
+You are an expert request router. Your task is to analyze the user's question and determine which specialist persona is best equipped to answer it. You must choose from the available personas and provide ONLY the persona's key name as your response.
+
+**Available Personas & Their Expertise:**
+
+1.  **`clinical_analyst`**:
+    *   Focuses on: Clinical trial data, drug efficacy, safety profiles, patient outcomes, medical conditions, and mechanisms of action.
+    *   Keywords: treat, condition, indication, dosage, patients, trial, effective, side effects.
+    *   Choose this persona for questions about the medical and scientific aspects of a drug.
+
+2.  **`health_economist`**:
+    *   Focuses on: Cost-effectiveness, pricing, market access, economic evaluations, and healthcare policy implications.
+    *   Keywords: cost, price, economic, budget, financial, value, policy, summary.
+    *   Choose this persona for questions about the financial or policy-level impact of a drug.
+
+3.  **`regulatory_specialist`**:
+    *   Focuses on: Submission types, meeting agendas, regulatory pathways (e.g., PBS listing types), sponsors, and official guidelines.
+    *   Keywords: sponsor, submission, listing, agenda, meeting, guideline, change, status.
+    *   Choose this persona for questions about the process and logistics of drug approval and listing.
+
+**User Question:**
+"{question}"
+
+**Instructions:**
+- Read the user's question carefully.
+- Compare it against the expertise of each persona.
+- Return ONLY the single key name (e.g., `clinical_analyst`) of the best-fitting persona. Do not add any explanation or other text.
+"""
+# --- END OF DEFINITIVE FIX ---
 
 # ==============================================================================
 # PROMPT 2: CYPHER QUERY GENERATION
@@ -1137,14 +1240,14 @@ def get_neo4j_driver() -> neo4j.Driver:
 ########################################################################
 
 # FILE: src/tools/retrievers.py
-# V6.4 (Enhanced Schema Introspection): Upgrades the schema generation for the
-# Cypher prompt. It now dynamically fetches and includes relationship properties,
-# giving the LLM the necessary context to write correct queries that filter on
-# relationship attributes like date and source.
+# V7.2 (Final Production Grade): Corrected the delimiter used for joining multiple
+# knowledge graph results. It now uses "\n---\n" to match the vector search tool,
+# ensuring each fact-citation pair is treated as a single, atomic unit by the agent.
+# This resolves the bug of missing references for KG-derived answers.
 
 import logging
 import time
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Union
 import neo4j
 import google.generativeai as genai
 
@@ -1154,69 +1257,78 @@ from src.prompts import CYPHER_GENERATION_PROMPT
 
 logger = logging.getLogger(__name__)
 
-# ... (Timer class and _format_pinecone_results are unchanged) ...
+
 class Timer:
     def __init__(self, name): self.name = name
     def __enter__(self): self.start = time.perf_counter(); return self
     def __exit__(self, *args): self.end = time.perf_counter(); logger.info(f"[TIMER] {self.name} took {(self.end - self.start) * 1000:.2f} ms")
 
+
+def _format_citation(doc_id: str, page_numbers: Union[List[int], str, None], source_url: str) -> str:
+    """Creates a standardized, clickable HTML citation link."""
+    page_str = "N/A"
+    link_url = source_url if source_url else "#"
+    
+    if page_numbers:
+        # Handle list of ints from Pinecone
+        if isinstance(page_numbers, list) and all(isinstance(p, int) for p in page_numbers):
+            unique_pages = sorted(list(set(page_numbers)))
+            if unique_pages:
+                page_str = f"Page {unique_pages[0]}" if len(unique_pages) == 1 else f"Pages {', '.join(map(str, unique_pages))}"
+                if source_url:
+                    link_url = f"{source_url}#page={unique_pages[0]}"
+        # Handle string from Neo4j
+        elif isinstance(page_numbers, str):
+            page_str = f"Page {page_numbers}"
+            first_page = page_numbers.split(',')[0].split('-')[0].strip()
+            if first_page.isdigit() and source_url:
+                 link_url = f"{source_url}#page={first_page}"
+
+    return f'<a href="{link_url}" target="_blank">{doc_id} ({page_str})</a>'
+
 def _format_pinecone_results(matches: List[dict]) -> List[str]:
     contents = []
-    MAX_PAGES_TO_SHOW = 4
-
     for match in matches:
         metadata = match.get('metadata', {})
         text = metadata.get('text', 'No content available.')
         doc_id = metadata.get('doc_id', 'Unknown Document')
-        page_numbers_raw = metadata.get('page_numbers', [])
-        url = metadata.get('source_pdf_url', '#')
+        page_numbers = metadata.get('page_numbers')
+        url = metadata.get('source_pdf_url')
         
-        page_str, link_url = "N/A", url
-
-        if page_numbers_raw and all(isinstance(p, (str, int, float)) for p in page_numbers_raw):
-            try:
-                unique_pages = sorted(list(set(map(int, page_numbers_raw))))
-                
-                if len(unique_pages) > MAX_PAGES_TO_SHOW:
-                    page_str = f"Pages {', '.join(map(str, unique_pages[:MAX_PAGES_TO_SHOW]))}, ..."
-                elif len(unique_pages) > 1:
-                    page_str = f"Pages {', '.join(map(str, unique_pages))}"
-                else:
-                    page_str = f"Page {unique_pages[0]}"
-                link_url = f"{url}#page={unique_pages[0]}"
-            except (ValueError, TypeError):
-                 page_str, link_url = ", ".join(map(str, page_numbers_raw)), url
-        
-        citation = f'<a href="{link_url}" target="_blank">{doc_id} ({page_str})</a>'
+        citation = _format_citation(doc_id, page_numbers, url)
         contents.append(f"Evidence from document: {text}\nCitation: {citation}")
     return contents
 
 def _serialize_neo4j_path(record: Dict[str, Any]) -> str:
-    # ... (This function is unchanged) ...
     path_data, rel_props = record.get("p"), record.get("rel_props")
     if not path_data: return ""
-    subject_name, predicate_type, object_name = None, None, None
+    
     try:
         if isinstance(path_data, neo4j.graph.Path):
-            subject_name, predicate_type, object_name = path_data.start_node.get('name'), path_data.relationships[0].type, path_data.end_node.get('name')
+            subject_name = path_data.start_node.get('name')
+            predicate_type = path_data.relationships[0].type
+            object_name = path_data.end_node.get('name')
         elif isinstance(path_data, list) and len(path_data) == 3:
             subject_name, predicate_type, object_name = path_data[0].get('name'), path_data[1], path_data[2].get('name')
+        else:
+            return ""
+
         if not all([subject_name, predicate_type, object_name]): return ""
+        
         predicate_str = predicate_type.replace('_', ' ').lower()
         text_representation = f"{subject_name} {predicate_str} {object_name}."
-        citation_text, link_url = "Knowledge Graph", "#"
-        if isinstance(rel_props, dict):
-            doc_id, url, page_num = rel_props.get('doc_id'), rel_props.get('source_pdf_url'), rel_props.get('page_numbers', 'N/A')
-            if doc_id: citation_text = f"{doc_id} (Page {page_num})"
-            if url: link_url = f"{url}#page={str(page_num).split(',')[0]}"
-        citation = f'<a href="{link_url}" target="_blank">{citation_text}</a>'
+        
+        doc_id = rel_props.get('doc_id', 'Knowledge Graph')
+        page_numbers = rel_props.get('page_numbers')
+        url = rel_props.get('source_pdf_url')
+        
+        citation = _format_citation(doc_id, page_numbers, url)
         return f"Evidence from graph: {text_representation}\nCitation: {citation}"
     except Exception as e:
         logger.warning(f"Could not serialize Neo4j path: {e}")
         return ""
 
 def vector_search(query: str, query_meta: QueryMetadata) -> ToolResult:
-    # ... (This function is unchanged) ...
     tool_name = "vector_search"; namespace = "pbac-text"
     with Timer(f"Tool: {tool_name}"):
         pinecone_index = get_pinecone_index()
@@ -1242,29 +1354,38 @@ def query_knowledge_graph(query: str, query_meta: QueryMetadata) -> ToolResult:
         if not llm or not driver: return ToolResult(tool_name=tool_name, success=False, content="Clients not available.")
         try:
             with driver.session() as session:
-                nodes_schema = session.run("CALL db.schema.nodeTypeProperties()").data()
-                rels_schema = session.run("CALL db.schema.relTypeProperties()").data()
+                nodes_schema_result = session.run("CALL db.schema.nodeTypeProperties() YIELD nodeLabels, propertyName, propertyTypes RETURN nodeLabels, propertyName, propertyTypes").data()
+                rels_schema_result = session.run("CALL db.schema.relTypeProperties() YIELD relType, propertyName, propertyTypes RETURN relType, propertyName, propertyTypes").data()
 
             schema_str = "Node Properties:\n"
-            for node in nodes_schema:
-                # --- START OF DEFINITIVE FIX ---
-                # The correct key for the property name is 'propertyName'.
-                prop_name = node['propertyName']
-                prop_type = node['propertyTypes'][0] # It's a list, take the first
-                schema_str += f"- Label: {node['nodeLabels'][0]}, Properties: {prop_name}: {prop_type}\n"
-                # --- END OF DEFINITIVE FIX ---
+            processed_nodes: Dict[str, List[str]] = {}
+            for node in nodes_schema_result:
+                label = node['nodeLabels'][0]
+                if label not in processed_nodes: processed_nodes[label] = []
+                prop_name = node.get('propertyName')
+                prop_type = node.get('propertyTypes', ['String'])[0]
+                if prop_name:
+                    processed_nodes[label].append(f"{prop_name}: {prop_type}")
+            for label, props in processed_nodes.items():
+                schema_str += f"- Label: {label}, Properties: {', '.join(props)}\n"
             
             schema_str += "\nRelationship Properties:\n"
-            for rel in rels_schema:
+            processed_rels: Dict[str, List[str]] = {}
+            for rel in rels_schema_result:
                 rel_type = rel.get('relType', '').strip('`')
-                properties = rel.get('properties', [])
-                props_list = [f"{p['property']}: {p['type']}" for p in properties]
-                props_str = ", ".join(props_list)
+                if not rel_type: continue
+                if rel_type not in processed_rels: processed_rels[rel_type] = []
+                prop_name = rel.get('propertyName')
+                prop_type = rel.get('propertyTypes', ['String'])[0]
+                if prop_name:
+                    processed_rels[rel_type].append(f"{prop_name}: {prop_type}")
+            for rel_type, props in processed_rels.items():
+                props_str = ", ".join(props)
                 schema_str += f"- (:Entity)-[:{rel_type} {{{props_str}}}]->(:Entity)\n"
 
             prompt = CYPHER_GENERATION_PROMPT.format(schema=schema_str, question=query)
             response = llm.generate_content(prompt, request_options=DEFAULT_REQUEST_OPTIONS)
-            cypher_query = response.text.strip().replace("```cypher", "").replace("```", "")
+            cypher_query = response.text.strip().replace("```cypher", "").replace("```", "").replace("`", "")
             
             if "none" in cypher_query.lower() or "match" not in cypher_query.lower(): 
                 return ToolResult(tool_name=tool_name, success=True, content="")
@@ -1274,7 +1395,12 @@ def query_knowledge_graph(query: str, query_meta: QueryMetadata) -> ToolResult:
             if not records: return ToolResult(tool_name=tool_name, success=True, content="")
             
             results = [_serialize_neo4j_path(record) for record in records if record.get("p")]
-            return ToolResult(tool_name=tool_name, success=True, content="\n".join(filter(None, results)))
+            
+            # --- START OF DEFINITIVE FIX: Use the correct delimiter ---
+            # This ensures each evidence/citation pair from the KG is treated as one atomic document by the agent.
+            return ToolResult(tool_name=tool_name, success=True, content="\n---\n".join(filter(None, results)))
+            # --- END OF DEFINITIVE FIX ---
+            
         except Exception as e:
             logger.error(f"Error in KG tool: {e}", exc_info=True)
             return ToolResult(tool_name=tool_name, success=False, content=f"An error occurred: {e}")
@@ -1326,7 +1452,7 @@ if "messages" not in st.session_state:
 if "current_persona" not in st.session_state:
     st.session_state.current_persona = "automatic"
 
-# --- Helper Functions (unchanged) ---
+# --- Helper Functions ---
 @st.cache_resource
 def initialize_agent():
     if not get_google_ai_client():
@@ -1347,7 +1473,7 @@ def reset_chat(persona_name: str):
         {"role": "assistant", "content": f"Hi! I'm now acting in **{display_name}** mode. How can I help you?"}
     ]
 
-# --- Sidebar (unchanged) ---
+# --- Sidebar ---
 with st.sidebar:
     st.header("🤖 Persona RAG Chatbot")
     st.markdown("Select a persona to tailor my retrieval strategy and answers to your specific role.")
@@ -1418,7 +1544,7 @@ with st.sidebar:
             if st.button(q, key=q, use_container_width=True):
                 st.session_state.run_prompt = q
 
-# --- Main Chat Interface (unchanged) ---
+# --- Main Chat Interface ---
 st.title("Persona-Aware RAG Agent")
 if st.session_state.current_persona == "automatic":
     st.caption("Currently in **Automatic Mode** (selects best persona per query)")
@@ -1465,7 +1591,6 @@ if prompt:
                 
                 # --- START OF DEFINITIVE FIX ---
                 # REMOVED asyncio.run() as agent.run is now a synchronous function.
-                # This was the cause of the ValueError crash.
                 response = st.session_state.agent.run(
                     prompt, 
                     persona=st.session_state.current_persona,

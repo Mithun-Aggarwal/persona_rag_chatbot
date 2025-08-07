@@ -1,11 +1,9 @@
 # FILE: src/agent.py
-# V10.1 (Final Production Architecture): Implements a robust, state-aware, and
-# strategic agent with graceful degradation and intelligent tool flow.
-# - Prioritizes the Knowledge Graph for suitable queries, bypassing vector search
-#   and re-ranking if a definitive answer is found. This fixes factual lookups.
-# - Uses ThreadPoolExecutor for efficient, parallel execution of sub-queries.
-# - Implements full resilience against transient API errors (e.g., 503 Overloaded).
-# - Corrected the ValueError on variable unpacking.
+# V10.2 (Architectural Fix): Implements a true KG-first retrieval strategy.
+# - The agent now exclusively uses the Knowledge Graph for suitable queries and only
+#   falls back to vector search if the KG fails or returns no content.
+# - This prevents the re-ranker from incorrectly discarding precise KG results and
+#   improves both accuracy for factual lookups and overall system efficiency.
 
 import json
 import logging
@@ -24,7 +22,13 @@ from src.planner.tool_planner import ToolPlanner
 from src.planner.persona_classifier import PersonaClassifier
 from src.planner.query_rewriter import QueryRewriter
 from src.router.tool_router import ToolRouter
-from src.prompts import DECOMPOSITION_PROMPT, REASONING_SYNTHESIS_PROMPT, DIRECT_SYNTHESIS_PROMPT, RERANKING_PROMPT, SUMMARIZATION_PROMPT
+from src.prompts import (
+    DECOMPOSITION_PROMPT, 
+    REASONING_SYNTHESIS_PROMPT, 
+    DIRECT_SYNTHESIS_PROMPT, 
+    RERANKING_PROMPT_V2 as RERANKING_PROMPT, # Use the improved prompt
+    SUMMARIZATION_PROMPT
+)
 
 logger = logging.getLogger(__name__)
 LOG_PATH = Path("trace_logs.jsonl")
@@ -34,11 +38,14 @@ def extract_json_from_response(text: str) -> dict | list:
     match = re.search(r'```json\s*([\[\{].*?[\]\}])\s*```', text, re.DOTALL)
     if match:
         try:
-            return json.loads(match.group(1))
+            return json.loads(match.group(1).strip())
         except json.JSONDecodeError:
             pass
     try:
-        return json.loads(text)
+        # Handle cases where the LLM might return a malformed but recoverable list like `[1, 2, ]`
+        clean_text = re.sub(r',\s*\]', ']', text)
+        clean_text = re.sub(r',\s*\}', '}', clean_text)
+        return json.loads(clean_text)
     except json.JSONDecodeError:
         logger.warning(f"Could not parse JSON from response text: {text}")
         return {}
@@ -94,13 +101,15 @@ class Agent:
                 logger.warning("Gemini re-ranking failed due to API issues. Falling back to top 5.")
                 return documents[:5]
 
-            best_indices = extract_json_from_response(response_text)
+            best_indices_data = extract_json_from_response(response_text)
+            best_indices = best_indices_data.get("indices", []) if isinstance(best_indices_data, dict) else best_indices_data
+            
             if not isinstance(best_indices, list):
-                logger.warning("Gemini re-ranker did not return a list. Falling back.")
+                logger.warning(f"Gemini re-ranker did not return a valid list. Response: {response_text}. Falling back.")
                 return documents[:5]
             
-            reranked_docs = [documents[i] for i in best_indices if i < len(documents)]
-            logger.info(f"Re-ranked {len(documents)} snippets down to {len(reranked_docs)} using Gemini.")
+            reranked_docs = [documents[i] for i in best_indices if isinstance(i, int) and i < len(documents)]
+            logger.info(f"Re-ranked {len(documents)} snippets down to {len(reranked_docs)} using Gemini based on indices: {best_indices}.")
             return reranked_docs
 
     def _run_single_rag_step(self, query: str, persona: str) -> Tuple[str, QueryMetadata, List[ToolPlanItem], List[ToolResult]]:
@@ -111,42 +120,45 @@ class Agent:
             tool_plan = self.planner.plan(query_meta, persona)
             if not tool_plan: return "I don't have a strategy for this query.", query_meta, [], []
             
-            # --- START OF DEFINITIVE FIX: Intelligent, Conditional Tool Flow ---
-            final_results = []
-            kg_success = False
-            # Step 1: Prioritize the Knowledge Graph if it's suitable and planned
+            # --- START OF ARCHITECTURAL FIX: True KG-First, Fallback-Second logic ---
+            retrieval_results: List[ToolResult] = []
+            used_kg = False
+            
+            # Step 1: Prioritize the Knowledge Graph for suitable queries.
             if query_meta.question_is_graph_suitable and any(t.tool_name == "query_knowledge_graph" for t in tool_plan):
+                logger.info("Query is suitable for Knowledge Graph. Executing KG tool first.")
                 kg_result = self.router.execute_tool("query_knowledge_graph", query, query_meta)
-                final_results.append(kg_result)
-                # Step 2: Evaluate the KG result. If it's a "golden" answer, we are done with retrieval.
-                if kg_result.success and kg_result.content and len(kg_result.content.strip()) > 10:
-                    logger.info("Knowledge Graph provided a definitive answer. Bypassing vector search and re-ranking.")
-                    kg_success = True
-
-            # Step 3: Fallback to Vector Search ONLY if the KG failed or wasn't suitable
-            if not kg_success and any(t.tool_name == "vector_search" for t in tool_plan):
-                vector_result = self.router.execute_tool("vector_search", query, query_meta)
-                final_results.append(vector_result)
-            # --- END OF DEFINITIVE FIX ---
+                retrieval_results.append(kg_result)
+                
+                # Step 2: If the KG provides a definitive answer, we are DONE with retrieval.
+                if kg_result.success and kg_result.content and kg_result.content.strip():
+                    logger.info("Knowledge Graph provided a definitive answer. Bypassing vector search.")
+                    used_kg = True
+            
+            # Step 3: Fallback to Vector Search ONLY if the KG was unsuitable or returned nothing.
+            if not used_kg:
+                logger.info("Knowledge Graph did not provide an answer. Falling back to vector search.")
+                if any(t.tool_name == "vector_search" for t in tool_plan):
+                    vector_result = self.router.execute_tool("vector_search", query, query_meta)
+                    retrieval_results.append(vector_result)
+            # --- END OF ARCHITECTURAL FIX ---
 
             all_docs = []
-            for res in final_results:
+            for res in retrieval_results:
                 if res and res.success and res.content and res.content.strip():
-                    splitter = "\n---\n" if res.tool_name == "vector_search" else "\n"
-                    all_docs.extend(res.content.split(splitter))
+                    # Both tools now use "\n---\n" as a separator for consistency.
+                    all_docs.extend(res.content.split("\n---\n"))
             
             all_docs = [doc for doc in all_docs if doc and doc.strip()]
 
             if not all_docs:
-                return "I searched but could not find any relevant details.", query_meta, tool_plan, final_results
+                return "I searched but could not find any relevant details.", query_meta, tool_plan, retrieval_results
 
-            if not kg_success:
-                ranked_docs = self._rerank_with_gemini(query, all_docs)
-            else:
-                ranked_docs = all_docs
+            # Only re-rank if we didn't get a definitive KG answer.
+            ranked_docs = self._rerank_with_gemini(query, all_docs) if not used_kg else all_docs
                 
             if not ranked_docs:
-                return "I found some information, but it did not seem relevant.", query_meta, tool_plan, final_results
+                return "I found some information, but it did not seem relevant enough to answer your question.", query_meta, tool_plan, retrieval_results
             
             evidence_texts, citation_links = [], []
             for doc in ranked_docs:
@@ -184,7 +196,7 @@ class Agent:
                     references_section += "\n".join([f"{i+1}. {link}" for i, link in enumerate(used_links_ordered)])
                     final_response += references_section
 
-            return final_response, query_meta, tool_plan, final_results
+            return final_response, query_meta, tool_plan, retrieval_results
 
     def run(self, query: str, persona: str, chat_history: List[str]) -> str:
         run_start_time = time.perf_counter()
@@ -238,14 +250,11 @@ class Agent:
                         sub_futures = [executor.submit(self._run_single_rag_step, sub_q, chosen_persona) for sub_q in retrieval_steps]
                         sub_results_list = [future.result() for future in sub_futures]
                     
-                    # --- START OF DEFINITIVE FIX: Corrected result unpacking ---
                     for i, sub_q in enumerate(retrieval_steps):
-                        # The function returns 4 items, we need to unpack all of them
                         sub_answer, _, _, sub_tool_results = sub_results_list[i]
                         observation = f"Observation for the question '{sub_q}':\n{sub_answer}"
                         scratchpad.append(observation)
                         if sub_tool_results: final_tool_results.extend(sub_tool_results)
-                    # --- END OF DEFINITIVE FIX ---
 
                     if logic_instruction and logic_instruction not in retrieval_steps:
                         scratchpad.append(f"Final Instruction: {logic_instruction}")

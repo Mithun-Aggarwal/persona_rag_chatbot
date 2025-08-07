@@ -1,8 +1,10 @@
 # FILE: src/tools/retrievers.py
-# V7.2 (Final Production Grade): Corrected the delimiter used for joining multiple
-# knowledge graph results. It now uses "\n---\n" to match the vector search tool,
-# ensuring each fact-citation pair is treated as a single, atomic unit by the agent.
-# This resolves the bug of missing references for KG-derived answers.
+# V7.5 (Definitive Fix):
+# 1. Completely re-architected _serialize_neo4j_path to be robust. It now correctly
+#    handles BOTH rich `neo4j.graph.Path` objects (for complex multi-hop queries) AND
+#    simple list-based results (for single-hop queries) returned by the driver.
+# 2. This solves the critical bug where the KG tool was silently failing on valid
+#    queries, ensuring it can now reliably answer both simple and complex questions.
 
 import logging
 import time
@@ -29,14 +31,12 @@ def _format_citation(doc_id: str, page_numbers: Union[List[int], str, None], sou
     link_url = source_url if source_url else "#"
     
     if page_numbers:
-        # Handle list of ints from Pinecone
         if isinstance(page_numbers, list) and all(isinstance(p, int) for p in page_numbers):
             unique_pages = sorted(list(set(page_numbers)))
             if unique_pages:
                 page_str = f"Page {unique_pages[0]}" if len(unique_pages) == 1 else f"Pages {', '.join(map(str, unique_pages))}"
                 if source_url:
                     link_url = f"{source_url}#page={unique_pages[0]}"
-        # Handle string from Neo4j
         elif isinstance(page_numbers, str):
             page_str = f"Page {page_numbers}"
             first_page = page_numbers.split(',')[0].split('-')[0].strip()
@@ -58,34 +58,57 @@ def _format_pinecone_results(matches: List[dict]) -> List[str]:
         contents.append(f"Evidence from document: {text}\nCitation: {citation}")
     return contents
 
-def _serialize_neo4j_path(record: Dict[str, Any]) -> str:
-    path_data, rel_props = record.get("p"), record.get("rel_props")
-    if not path_data: return ""
+# --- START OF DEFINITIVE FIX: Robust, Type-Aware Path Serializer ---
+def _serialize_neo4j_path(record: Dict[str, Any]) -> List[str]:
+    """
+    Serializes a Neo4j path of arbitrary length into a list of citable facts.
+    Handles both rich `neo4j.graph.Path` objects and simple list-based results.
+    """
+    path_data = record.get("p")
+    rel_props_list = record.get("rel_props_list")
     
-    try:
-        if isinstance(path_data, neo4j.graph.Path):
-            subject_name = path_data.start_node.get('name')
-            predicate_type = path_data.relationships[0].type
-            object_name = path_data.end_node.get('name')
-        elif isinstance(path_data, list) and len(path_data) == 3:
-            subject_name, predicate_type, object_name = path_data[0].get('name'), path_data[1], path_data[2].get('name')
-        else:
-            return ""
+    if not path_data or not rel_props_list:
+        return []
 
-        if not all([subject_name, predicate_type, object_name]): return ""
-        
-        predicate_str = predicate_type.replace('_', ' ').lower()
-        text_representation = f"{subject_name} {predicate_str} {object_name}."
-        
-        doc_id = rel_props.get('doc_id', 'Knowledge Graph')
-        page_numbers = rel_props.get('page_numbers')
-        url = rel_props.get('source_pdf_url')
-        
-        citation = _format_citation(doc_id, page_numbers, url)
-        return f"Evidence from graph: {text_representation}\nCitation: {citation}"
+    facts = []
+    try:
+        # Case 1: Handle rich Path objects (typically for multi-hop queries)
+        if isinstance(path_data, neo4j.graph.Path):
+            relationships = path_data.relationships
+        # Case 2: Handle simple list-based results (often for single-hop queries)
+        # The driver may return a list: [start_node, relationship, end_node]
+        elif isinstance(path_data, list):
+            relationships = [item for item in path_data if isinstance(item, neo4j.graph.Relationship)]
+        else:
+            logger.warning(f"Unrecognized Neo4j path data type: {type(path_data)}. Could not serialize.")
+            return []
+
+        # Iterate through each relationship segment in the path
+        for i, rel in enumerate(relationships):
+            if i >= len(rel_props_list): continue
+            rel_props = rel_props_list[i]
+            if not rel_props: continue
+            
+            subject_name = rel.start_node.get('name')
+            object_name = rel.end_node.get('name')
+            rel_type = rel_props.get('type') # Get type from properties map
+            
+            if not all([subject_name, rel_type, object_name]): continue
+
+            predicate_str = rel_type.replace('_', ' ').lower()
+            text_representation = f"{subject_name} {predicate_str} {object_name}."
+            
+            doc_id = rel_props.get('doc_id', 'Knowledge Graph')
+            page_numbers = rel_props.get('page_numbers')
+            url = rel_props.get('source_pdf_url')
+            citation = _format_citation(doc_id, page_numbers, url)
+            facts.append(f"Evidence from graph: {text_representation}\nCitation: {citation}")
+            
     except Exception as e:
-        logger.warning(f"Could not serialize Neo4j path: {e}")
-        return ""
+        logger.error(f"Failed to serialize Neo4j path: {e}", exc_info=True)
+    
+    return facts
+# --- END OF DEFINITIVE FIX ---
 
 def vector_search(query: str, query_meta: QueryMetadata) -> ToolResult:
     tool_name = "vector_search"; namespace = "pbac-text"
@@ -140,7 +163,7 @@ def query_knowledge_graph(query: str, query_meta: QueryMetadata) -> ToolResult:
                     processed_rels[rel_type].append(f"{prop_name}: {prop_type}")
             for rel_type, props in processed_rels.items():
                 props_str = ", ".join(props)
-                schema_str += f"- (:Entity)-[:{rel_type} {{{props_str}}}]->(:Entity)\n"
+                schema_str += f"- (:Entity)-[:{rel_type}]->(:Entity) properties: {props_str}\n"
 
             prompt = CYPHER_GENERATION_PROMPT.format(schema=schema_str, question=query)
             response = llm.generate_content(prompt, request_options=DEFAULT_REQUEST_OPTIONS)
@@ -153,12 +176,11 @@ def query_knowledge_graph(query: str, query_meta: QueryMetadata) -> ToolResult:
             with driver.session() as session: records = session.run(cypher_query).data()
             if not records: return ToolResult(tool_name=tool_name, success=True, content="")
             
-            results = [_serialize_neo4j_path(record) for record in records if record.get("p")]
+            all_facts = []
+            for record in records:
+                all_facts.extend(_serialize_neo4j_path(record))
             
-            # --- START OF DEFINITIVE FIX: Use the correct delimiter ---
-            # This ensures each evidence/citation pair from the KG is treated as one atomic document by the agent.
-            return ToolResult(tool_name=tool_name, success=True, content="\n---\n".join(filter(None, results)))
-            # --- END OF DEFINITIVE FIX ---
+            return ToolResult(tool_name=tool_name, success=True, content="\n---\n".join(filter(None, all_facts)))
             
         except Exception as e:
             logger.error(f"Error in KG tool: {e}", exc_info=True)

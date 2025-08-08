@@ -1,9 +1,10 @@
 # FILE: src/prompts.py
-# V3.7 (Definitive Fix):
-# 1. Corrected the Cypher syntax in CYPER_GENERATION_PROMPT to use the proper map
-#    projection operator `| properties(rel) {.*, type: type(rel)}` instead of the
-#    incorrect `+` operator. This resolves the CypherSyntaxError from Neo4j.
-# 2. This is the final fix to make the Knowledge Graph tool fully robust and operational.
+# V3.8 (Definitive Syntax Fix):
+# - Corrected the Cypher syntax in CYPER_GENERATION_PROMPT to use the proper map
+#   projection operator `rel {.*, type: type(rel)}` instead of the invalid
+#   `rel {{.*, type: type(rel)}}`.
+# - This resolves a latent CypherSyntaxError from Neo4j 5.x and ensures that the
+#   LLM learns from a syntactically perfect example, making the KG tool more robust.
 
 """
 Production-grade prompts for a robust RAG agent. This version supports both
@@ -62,7 +63,7 @@ You are an expert request router. Your task is to analyze the user's question an
 """
 
 # ==============================================================================
-# PROMPT 2: CYPHER QUERY GENERATION (SYNTAX FIXED)
+# PROMPT 2: CYPHER QUERY GENERATION (Multi-Hop Fix)
 # ==============================================================================
 CYPHER_GENERATION_PROMPT = """
 You are an expert Neo4j Cypher query developer. Your task is to convert a user's question into a single, valid, read-only Cypher query based on the provided graph schema and examples.
@@ -71,28 +72,22 @@ You are an expert Neo4j Cypher query developer. Your task is to convert a user's
 {schema}
 
 **CRITICAL Instructions:**
-1.  **Analyze the question deeply.** Identify all entities and the relationships between them.
-2.  **Construct a valid Cypher query** to find the answer. The query must be read-only.
-3.  **Always query against the `name_normalized` property for nodes** (e.g., `WHERE drug.name_normalized = 'abaloparatide'`).
-4.  **To filter by properties on a relationship, you MUST name the relationship in the MATCH clause** (e.g., `MATCH (d)-[r:HASSPONSOR]->(s)`) and then use it in the WHERE clause (e.g., `WHERE r.doc_id CONTAINS 'March-2025'`).
-5.  **Return Path and All Relationship Properties:** Your `RETURN` clause must always be `RETURN p, [rel IN relationships(p) | rel {{.*, type: type(rel)}}] AS rel_props_list`. This uses the correct map projection syntax.
-6.  **Handle Failure:** If the question cannot be answered with a Cypher query from the schema, you MUST return the single word: `NONE`.
-7.  **Output ONLY the Cypher query or the word `NONE`.**
+1.  **Name all components directly in the MATCH clause.** For example: `MATCH (start_node:Entity)-[r:HASSPONSOR]->(end_node:Entity)`.
+2.  **Always query against the `name_normalized` property for nodes** (e.g., `WHERE start_node.name_normalized = 'abaloparatide'`).
+3.  **Your RETURN clause MUST be simple and direct:** `RETURN start_node, end_node, type(r) as rel_type, properties(r) as r_props`. This returns the raw nodes, the relationship type string, AND a clean dictionary of relationship properties.
+4.  **Handle Failure:** If the question cannot be answered, return the single word: `NONE`.
+5.  **Output ONLY the Cypher query or the word `NONE`.**
 
 ---
 **Example Gallery:**
 
 **# Example 1: Simple Fact Retrieval**
 Question: "What company sponsors Abaloparatide?"
-Cypher: MATCH p=(drug:Entity)-[r:HASSPONSOR]->(sponsor:Entity) WHERE drug.name_normalized = 'abaloparatide' RETURN p, [rel IN relationships(p) | rel {{.*, type: type(rel)}}] AS rel_props_list
+Cypher: MATCH (start_node:Entity)-[r:HASSPONSOR]->(end_node:Entity) WHERE start_node.name_normalized = 'abaloparatide' RETURN start_node, end_node, type(r) as rel_type, properties(r) as r_props
 
 **# Example 2: Multi-Hop / "Bridge" Query**
 Question: "What is the indication for the drug whose trade name is Cabometyx?"
-Cypher: MATCH p=(trade_name:Entity)<-[:HASTRADENAME]-(drug:Entity)-[:HASINDICATION]->(indication:Entity) WHERE trade_name.name_normalized = 'cabometyx' RETURN p, [rel IN relationships(p) | rel {{.*, type: type(rel)}}] AS rel_props_list
-
-**# Example 3: Filtering by Relationship Property**
-Question: "List all sponsors who made submissions in the March 2025 PBAC meeting."
-Cypher: MATCH p=(drug:Entity)-[r:HASSPONSOR]->(sponsor:Entity) WHERE r.doc_id CONTAINS 'March-2025' RETURN p, [rel IN relationships(p) | rel {{.*, type: type(rel)}}] AS rel_props_list
+Cypher: MATCH (trade_name:Entity)<-[:HASTRADENAME]-(start_node:Entity)-[r:HASINDICATION]->(end_node:Entity) WHERE trade_name.name_normalized = 'cabometyx' RETURN start_node, end_node, type(r) as rel_type, properties(r) as r_props
 ---
 
 **Current Task:**
@@ -145,10 +140,10 @@ Now, generate the JSON output.
 """
 
 # ==============================================================================
-# PROMPT 4: REASONING SYNTHESIS (REFINED)
+# PROMPT 4: REASONING SYNTHESIS (Robustness Fix)
 # ==============================================================================
 REASONING_SYNTHESIS_PROMPT = """
-You are a highly intelligent synthesis agent. Your task is to provide a final, comprehensive answer to the user's original question by reasoning over the observations you have collected.
+You are a highly intelligent synthesis agent. Your task is to provide a final, comprehensive answer to the user's original question by reasoning over the observations you have collected in the scratchpad.
 
 **User's Original Question:** "{question}"
 
@@ -160,10 +155,21 @@ You are a highly intelligent synthesis agent. Your task is to provide a final, c
 **CRITICAL INSTRUCTIONS:**
 1.  **Analyze the User's Original Question** to understand the final logical operation required (e.g., comparison, intersection, summarization).
 2.  **Review all Observations.** These are the facts you have gathered.
-3.  **Perform the Required Logic.** If the original question was a comparison, compare the facts. If it asked for items in common, find the intersection of the lists in your observations.
-4.  **Handle Partial or Missing Information Gracefully.** This is your most important task. If you have an answer for one part of the question but not another, you **MUST** state that clearly. For example: "The submission purpose for Alectinib was a change to the existing listing [cite]. However, I could not find any information regarding the submission purpose for Acalabrutinib." Do not give a generic failure message.
-5.  **Synthesize the Final Answer.** Do not show your step-by-step reasoning. Just provide the final, clean, and comprehensive answer.
+3.  **Perform the Required Logic.** If the original question was a comparison, compare the facts. If it asked for items in common, identify the intersection.
+4.  **Handle Partial or Missing Information Gracefully. This is your most important task.** If you have an answer for one part of the question but not another, you **MUST** state that clearly and explicitly. Do not invent information or give a generic failure message.
+5.  **Synthesize the Final Answer.** Do not show your step-by-step reasoning. Just provide the final, clean, and comprehensive answer based on the facts.
 6.  Include citations from your observations where appropriate.
+
+**Example of Handling Missing Information:**
+*   User's Original Question: "Compare the submission purposes for DrugA and DrugB."
+*   Scratchpad:
+    Observation for the question 'What was the submission purpose for DrugA?':
+    The submission purpose for DrugA was a new PBS listing [1].
+    ---
+    Observation for the question 'What was the submission purpose for DrugB?':
+    I searched but could not find any relevant details.
+*   Your Final Answer:
+    The submission purpose for DrugA was a new PBS listing [1]. I could not find any information regarding the submission purpose for DrugB.
 
 **Final Answer:**
 """

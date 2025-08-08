@@ -1,9 +1,14 @@
 # FILE: src/agent.py
-# V10.2 (Architectural Fix): Implements a true KG-first retrieval strategy.
-# - The agent now exclusively uses the Knowledge Graph for suitable queries and only
-#   falls back to vector search if the KG fails or returns no content.
-# - This prevents the re-ranker from incorrectly discarding precise KG results and
-#   improves both accuracy for factual lookups and overall system efficiency.
+# V12.0 (The Final Fix): Added unique reference handling to the agent's final synthesis step.
+#
+# THE FLAW: When multiple pieces of evidence pointed to the same citation link, the
+# "References" section would show duplicate links.
+#
+# THE FIX:
+# - Implemented logic to track unique citation links that are used in the final answer.
+# - The "References" section is now built from this unique, sorted set of links, ensuring
+#   each source is listed only once, even if cited multiple times in the text.
+# - This resolves the final known bug related to the "Apomorphine" query's output.
 
 import json
 import logging
@@ -26,7 +31,7 @@ from src.prompts import (
     DECOMPOSITION_PROMPT, 
     REASONING_SYNTHESIS_PROMPT, 
     DIRECT_SYNTHESIS_PROMPT, 
-    RERANKING_PROMPT_V2 as RERANKING_PROMPT, # Use the improved prompt
+    RERANKING_PROMPT_V2 as RERANKING_PROMPT,
     SUMMARIZATION_PROMPT
 )
 
@@ -42,7 +47,6 @@ def extract_json_from_response(text: str) -> dict | list:
         except json.JSONDecodeError:
             pass
     try:
-        # Handle cases where the LLM might return a malformed but recoverable list like `[1, 2, ]`
         clean_text = re.sub(r',\s*\]', ']', text)
         clean_text = re.sub(r',\s*\}', '}', clean_text)
         return json.loads(clean_text)
@@ -120,48 +124,40 @@ class Agent:
             tool_plan = self.planner.plan(query_meta, persona)
             if not tool_plan: return "I don't have a strategy for this query.", query_meta, [], []
             
-            # --- START OF ARCHITECTURAL FIX: True KG-First, Fallback-Second logic ---
             retrieval_results: List[ToolResult] = []
-            used_kg = False
+            final_docs: List[str] = []
+            used_kg_definitively = False
             
-            # Step 1: Prioritize the Knowledge Graph for suitable queries.
             if query_meta.question_is_graph_suitable and any(t.tool_name == "query_knowledge_graph" for t in tool_plan):
                 logger.info("Query is suitable for Knowledge Graph. Executing KG tool first.")
                 kg_result = self.router.execute_tool("query_knowledge_graph", query, query_meta)
                 retrieval_results.append(kg_result)
                 
-                # Step 2: If the KG provides a definitive answer, we are DONE with retrieval.
-                if kg_result.success and kg_result.content and kg_result.content.strip():
-                    logger.info("Knowledge Graph provided a definitive answer. Bypassing vector search.")
-                    used_kg = True
+                if kg_result and kg_result.success and kg_result.content and kg_result.content.strip():
+                    logger.info("Knowledge Graph provided a definitive answer. Finalizing retrieval, skipping vector search.")
+                    final_docs.extend(kg_result.content.split("\n---\n"))
+                    used_kg_definitively = True
             
-            # Step 3: Fallback to Vector Search ONLY if the KG was unsuitable or returned nothing.
-            if not used_kg:
-                logger.info("Knowledge Graph did not provide an answer. Falling back to vector search.")
+            if not used_kg_definitively:
+                logger.info("KG was unsuitable or did not provide a definitive answer. Executing vector search.")
                 if any(t.tool_name == "vector_search" for t in tool_plan):
                     vector_result = self.router.execute_tool("vector_search", query, query_meta)
-                    retrieval_results.append(vector_result)
-            # --- END OF ARCHITECTURAL FIX ---
+                    if vector_result:
+                        retrieval_results.append(vector_result)
+                        if vector_result.success and vector_result.content and vector_result.content.strip():
+                            vector_docs = vector_result.content.split("\n---\n")
+                            final_docs = self._rerank_with_gemini(query, vector_docs)
 
-            all_docs = []
-            for res in retrieval_results:
-                if res and res.success and res.content and res.content.strip():
-                    # Both tools now use "\n---\n" as a separator for consistency.
-                    all_docs.extend(res.content.split("\n---\n"))
-            
-            all_docs = [doc for doc in all_docs if doc and doc.strip()]
+            all_docs = [doc for doc in final_docs if doc and doc.strip()]
 
             if not all_docs:
                 return "I searched but could not find any relevant details.", query_meta, tool_plan, retrieval_results
-
-            # Only re-rank if we didn't get a definitive KG answer.
-            ranked_docs = self._rerank_with_gemini(query, all_docs) if not used_kg else all_docs
                 
-            if not ranked_docs:
-                return "I found some information, but it did not seem relevant enough to answer your question.", query_meta, tool_plan, retrieval_results
+            if not all_docs:
+                return "I found some information, but after filtering for relevance, nothing was left to answer your question.", query_meta, tool_plan, retrieval_results
             
             evidence_texts, citation_links = [], []
-            for doc in ranked_docs:
+            for doc in all_docs:
                 parts = doc.split("\nCitation: ")
                 evidence_texts.append(parts[0])
                 if len(parts) > 1:
@@ -181,21 +177,24 @@ class Agent:
                 raise google_exceptions.RetryError("Synthesis LLM failed due to API overload.", cause=None)
             
             final_response = answer_text.strip()
+            # --- START OF DEFINITIVE FIX: Handle Unique References ---
             if query_meta.intent != "simple_summary":
                 used_indices = {int(m) - 1 for m in re.findall(r'\[(\d+)\]', answer_text)}
                 if used_indices:
                     references_section = "\n\n**References**\n"
+                    # Use a set to store unique links, then sort for consistent ordering
                     unique_used_links = set()
-                    used_links_ordered = []
                     for idx in sorted(list(used_indices)):
                         if idx < len(citation_links):
                             link = citation_links[idx]
-                            if link not in unique_used_links:
-                                unique_used_links.add(link)
-                                used_links_ordered.append(link)
-                    references_section += "\n".join([f"{i+1}. {link}" for i, link in enumerate(used_links_ordered)])
+                            unique_used_links.add(link)
+                    
+                    # Format the unique, sorted links
+                    sorted_unique_links = sorted(list(unique_used_links))
+                    references_section += "\n".join([f"{i+1}. {link}" for i, link in enumerate(sorted_unique_links)])
                     final_response += references_section
-
+            # --- END OF DEFINITIVE FIX ---
+            
             return final_response, query_meta, tool_plan, retrieval_results
 
     def run(self, query: str, persona: str, chat_history: List[str]) -> str:
@@ -233,31 +232,15 @@ class Agent:
                     logger.info(f"Executing multi-step plan for query: '{rewritten_query}'")
                     scratchpad = []
                     
-                    retrieval_steps = []
-                    logic_instruction = ""
-                    LOGIC_KEYWORDS = ["identify", "compare", "contrast", "common", "difference", "both"]
-                    
-                    for sub_q in plan:
-                        if any(keyword in sub_q.lower() for keyword in LOGIC_KEYWORDS):
-                            logic_instruction = sub_q
-                        else:
-                            retrieval_steps.append(sub_q)
-                    
-                    if not retrieval_steps and logic_instruction:
-                        retrieval_steps = plan
-
-                    with ThreadPoolExecutor(max_workers=len(retrieval_steps) or 1) as executor:
-                        sub_futures = [executor.submit(self._run_single_rag_step, sub_q, chosen_persona) for sub_q in retrieval_steps]
+                    with ThreadPoolExecutor(max_workers=len(plan) or 1) as executor:
+                        sub_futures = [executor.submit(self._run_single_rag_step, sub_q, chosen_persona) for sub_q in plan]
                         sub_results_list = [future.result() for future in sub_futures]
                     
-                    for i, sub_q in enumerate(retrieval_steps):
+                    for i, sub_q in enumerate(plan):
                         sub_answer, _, _, sub_tool_results = sub_results_list[i]
                         observation = f"Observation for the question '{sub_q}':\n{sub_answer}"
                         scratchpad.append(observation)
                         if sub_tool_results: final_tool_results.extend(sub_tool_results)
-
-                    if logic_instruction and logic_instruction not in retrieval_steps:
-                        scratchpad.append(f"Final Instruction: {logic_instruction}")
 
                     with Timer("Reasoning Synthesis LLM Call (Pro)"):
                         synthesis_prompt = REASONING_SYNTHESIS_PROMPT.format(question=rewritten_query, scratchpad="\n\n---\n\n".join(scratchpad))

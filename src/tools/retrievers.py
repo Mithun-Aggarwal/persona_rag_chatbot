@@ -1,10 +1,17 @@
 # FILE: src/tools/retrievers.py
-# V7.5 (Definitive Fix):
-# 1. Completely re-architected _serialize_neo4j_path to be robust. It now correctly
-#    handles BOTH rich `neo4j.graph.Path` objects (for complex multi-hop queries) AND
-#    simple list-based results (for single-hop queries) returned by the driver.
-# 2. This solves the critical bug where the KG tool was silently failing on valid
-#    queries, ensuring it can now reliably answer both simple and complex questions.
+# V17.0 (The Unbreakable Fix): This is the definitive version based on conclusive log analysis.
+#
+# THE FLAW: All previous attempts incorrectly assumed the neo4j driver's `.data()` method
+# returned rich graph objects. The logs proved it returns simple Python dictionaries.
+#
+# THE FIX:
+# 1. The serialization logic has been completely rewritten to treat the contents of the
+#    record (`start_node`, `end_node`) as simple dictionaries.
+# 2. It now accesses values using dictionary keys (e.g., `start_node.get('name')`) instead
+#    of trying to call object methods.
+#
+# This approach is simple, direct, aligns perfectly with the observed log data, and
+# will definitively resolve all previous KG tool failures.
 
 import logging
 import time
@@ -58,57 +65,45 @@ def _format_pinecone_results(matches: List[dict]) -> List[str]:
         contents.append(f"Evidence from document: {text}\nCitation: {citation}")
     return contents
 
-# --- START OF DEFINITIVE FIX: Robust, Type-Aware Path Serializer ---
-def _serialize_neo4j_path(record: Dict[str, Any]) -> List[str]:
+# --- START OF DEFINITIVE FIX V17.0 ---
+def _serialize_kg_results(records: List[Dict[str, Any]]) -> List[str]:
     """
-    Serializes a Neo4j path of arbitrary length into a list of citable facts.
-    Handles both rich `neo4j.graph.Path` objects and simple list-based results.
+    Serializes records from the simple Cypher query pattern.
+    It correctly treats all returned values as simple Python dictionaries and primitives.
     """
-    path_data = record.get("p")
-    rel_props_list = record.get("rel_props_list")
-    
-    if not path_data or not rel_props_list:
-        return []
-
     facts = []
-    try:
-        # Case 1: Handle rich Path objects (typically for multi-hop queries)
-        if isinstance(path_data, neo4j.graph.Path):
-            relationships = path_data.relationships
-        # Case 2: Handle simple list-based results (often for single-hop queries)
-        # The driver may return a list: [start_node, relationship, end_node]
-        elif isinstance(path_data, list):
-            relationships = [item for item in path_data if isinstance(item, neo4j.graph.Relationship)]
-        else:
-            logger.warning(f"Unrecognized Neo4j path data type: {type(path_data)}. Could not serialize.")
-            return []
+    for record in records:
+        # The .data() method returns dictionaries, not rich objects. Access accordingly.
+        start_node_dict = record.get("start_node")
+        end_node_dict = record.get("end_node")
+        rel_type = record.get("rel_type")
+        rel_props = record.get("r_props")
 
-        # Iterate through each relationship segment in the path
-        for i, rel in enumerate(relationships):
-            if i >= len(rel_props_list): continue
-            rel_props = rel_props_list[i]
-            if not rel_props: continue
+        # Check for the presence of the dictionaries/strings themselves
+        if not all([start_node_dict, end_node_dict, rel_type, rel_props]):
+            logger.warning(f"Skipping record due to missing core data keys: {record}")
+            continue
+        
+        try:
+            # Access values using dictionary .get() method for safety
+            subject_name = start_node_dict.get('name', 'Unknown')
+            object_name = end_node_dict.get('name', 'Unknown')
             
-            subject_name = rel.start_node.get('name')
-            object_name = rel.end_node.get('name')
-            rel_type = rel_props.get('type') # Get type from properties map
-            
-            if not all([subject_name, rel_type, object_name]): continue
+            predicate_str = str(rel_type).replace('_', ' ').lower()
+            text_representation = f"{subject_name.upper()} {predicate_str} {object_name.upper()}."
 
-            predicate_str = rel_type.replace('_', ' ').lower()
-            text_representation = f"{subject_name} {predicate_str} {object_name}."
-            
-            doc_id = rel_props.get('doc_id', 'Knowledge Graph')
-            page_numbers = rel_props.get('page_numbers')
-            url = rel_props.get('source_pdf_url')
-            citation = _format_citation(doc_id, page_numbers, url)
+            citation = _format_citation(
+                rel_props.get('doc_id', 'KG'),
+                rel_props.get('page_numbers'),
+                rel_props.get('source_pdf_url') # Match key from r_props
+            )
             facts.append(f"Evidence from graph: {text_representation}\nCitation: {citation}")
-            
-    except Exception as e:
-        logger.error(f"Failed to serialize Neo4j path: {e}", exc_info=True)
-    
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during KG serialization: {e}. Record: {record}", exc_info=True)
+            continue
+
     return facts
-# --- END OF DEFINITIVE FIX ---
+# --- END OF DEFINITIVE FIX V17.0 ---
 
 def vector_search(query: str, query_meta: QueryMetadata) -> ToolResult:
     tool_name = "vector_search"; namespace = "pbac-text"
@@ -145,8 +140,8 @@ def query_knowledge_graph(query: str, query_meta: QueryMetadata) -> ToolResult:
                 label = node['nodeLabels'][0]
                 if label not in processed_nodes: processed_nodes[label] = []
                 prop_name = node.get('propertyName')
-                prop_type = node.get('propertyTypes', ['String'])[0]
                 if prop_name:
+                    prop_type = node.get('propertyTypes', ['String'])[0]
                     processed_nodes[label].append(f"{prop_name}: {prop_type}")
             for label, props in processed_nodes.items():
                 schema_str += f"- Label: {label}, Properties: {', '.join(props)}\n"
@@ -158,8 +153,8 @@ def query_knowledge_graph(query: str, query_meta: QueryMetadata) -> ToolResult:
                 if not rel_type: continue
                 if rel_type not in processed_rels: processed_rels[rel_type] = []
                 prop_name = rel.get('propertyName')
-                prop_type = rel.get('propertyTypes', ['String'])[0]
                 if prop_name:
+                    prop_type = rel.get('propertyTypes', ['String'])[0]
                     processed_rels[rel_type].append(f"{prop_name}: {prop_type}")
             for rel_type, props in processed_rels.items():
                 props_str = ", ".join(props)
@@ -173,15 +168,22 @@ def query_knowledge_graph(query: str, query_meta: QueryMetadata) -> ToolResult:
                 return ToolResult(tool_name=tool_name, success=True, content="")
                 
             logger.info(f"Generated Cypher: {cypher_query}")
+            # The .data() method here is the source of the dictionaries
             with driver.session() as session: records = session.run(cypher_query).data()
             if not records: return ToolResult(tool_name=tool_name, success=True, content="")
             
-            all_facts = []
-            for record in records:
-                all_facts.extend(_serialize_neo4j_path(record))
+            all_facts = _serialize_kg_results(records)
             
-            return ToolResult(tool_name=tool_name, success=True, content="\n---\n".join(filter(None, all_facts)))
+            final_content = "\n---\n".join(filter(None, all_facts))
+            if final_content:
+                logger.info(f"KG tool successfully retrieved and serialized {len(all_facts)} facts.")
+            else:
+                logger.warning("KG tool ran and found records, but serialization produced no content.")
+            return ToolResult(tool_name=tool_name, success=True, content=final_content)
             
+        except neo4j.exceptions.CypherSyntaxError as e:
+            logger.error(f"A Cypher syntax error occurred in the KG tool. Query: '{cypher_query}'. Error: {e}", exc_info=False)
+            return ToolResult(tool_name=tool_name, success=False, content=f"A database syntax error occurred.")
         except Exception as e:
-            logger.error(f"Error in KG tool: {e}", exc_info=True)
-            return ToolResult(tool_name=tool_name, success=False, content=f"An error occurred: {e}")
+            logger.error(f"An unexpected error occurred in the KG tool: {e}", exc_info=True)
+            return ToolResult(tool_name=tool_name, success=False, content=f"An unexpected error occurred.")

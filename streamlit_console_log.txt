@@ -4,110 +4,19 @@
   Local URL: http://localhost:8502
   Network URL: http://192.168.20.19:8502
 
-
-  A new version of Streamlit is available.
-
-  See what's new at https://discuss.streamlit.io/c/announcements
-
-  Enter the following command to upgrade:
-  $ pip install streamlit --upgrade
-
-2025-08-08 17:42:15,092 - [INFO] - [src.tools.clients:48] - Google AI client configured successfully.
-2025-08-08 17:42:15,092 - [INFO] - [src.tools.clients:65] - Requesting Flash Model: gemini-1.5-flash-latest
-2025-08-08 17:42:15,094 - [INFO] - [src.planner.tool_planner:58] - Successfully loaded persona-tool map from '/home/mit/persona_rag_chatbot/config/persona_tool_map.yml'.
-2025-08-08 17:42:15,094 - [INFO] - [src.router.tool_router:19] - ToolRouter initialized with 2 tools.
-2025-08-08 17:42:15,094 - [INFO] - [src.tools.clients:58] - Requesting GenerativeModel: gemini-1.5-pro-latest
-2025-08-08 17:42:15,094 - [INFO] - [src.tools.clients:65] - Requesting Flash Model: gemini-1.5-flash-latest
-2025-08-08 17:42:15,094 - [INFO] - [__main__:51] - Unified agent initialized successfully and cached for the session.
-2025-08-08 17:42:16,549 - [INFO] - [src.planner.query_rewriter:76] - Query deemed standalone. Bypassing LLM rewrite. Query: 'What company is the sponsor for Abaloparatide?'
-2025-08-08 17:42:17,163 - [INFO] - [src.planner.persona_classifier:60] - Query classified for persona: 'regulatory_specialist'
-2025-08-08 17:42:18,284 - [INFO] - [src.agent:61] - [TIMER] Decomposition took 1120.45 ms
-2025-08-08 17:42:18,284 - [INFO] - [src.agent:229] - Executing single-step plan for query: 'What company is the sponsor for Abaloparatide?'
-2025-08-08 17:42:18,284 - [INFO] - [src.planner.query_classifier:56] - Classifying query: What company is the sponsor for Abaloparatide?
-2025-08-08 17:42:18,997 - [INFO] - [src.planner.query_classifier:76] - Classification result: {
-  "intent": "specific_fact_lookup",
-  "keywords": [
-    "Abaloparatide"
-  ],
-  "question_is_graph_suitable": true,
-  "themes": [
-    "Drug/Therapy Description"
-  ]
-}
-2025-08-08 17:42:18,997 - [INFO] - [src.planner.tool_planner:67] - Planning tools for intent 'specific_fact_lookup' and persona 'regulatory_specialist'
-2025-08-08 17:42:18,997 - [INFO] - [src.planner.tool_planner:110] - Coverage threshold of 0.85 met. Finalizing plan.
-2025-08-08 17:42:18,997 - [INFO] - [src.planner.tool_planner:113] - Generated tool plan: ['{\n  "tool_name": "query_knowledge_graph",\n  "estimated_coverage": 0.81\n}', '{\n  "tool_name": "vector_search",\n  "estimated_coverage": 0.5\n}']
-2025-08-08 17:42:18,997 - [INFO] - [src.agent:132] - Query is suitable for Knowledge Graph. Executing KG tool first.
-2025-08-08 17:42:18,997 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'query_knowledge_graph'
-2025-08-08 17:42:20,154 - [INFO] - [src.tools.clients:97] - Neo4j driver connected successfully.
-2025-08-08 17:42:21,640 - [INFO] - [src.tools.retrievers:170] - Generated Cypher: MATCH (start_node:Entity)-[r:HASSPONSOR]->(end_node:Entity) WHERE start_node.name_normalized = 'abaloparatide' RETURN start_node, end_node, type(r) as rel_type, properties(r) as r_props
-2025-08-08 17:42:21,956 - [INFO] - [src.tools.retrievers:179] - KG tool successfully retrieved and serialized 1 facts.
-2025-08-08 17:42:21,956 - [INFO] - [src.tools.retrievers:32] - [TIMER] Tool: query_knowledge_graph took 2959.01 ms
-2025-08-08 17:42:21,956 - [INFO] - [src.agent:137] - Knowledge Graph provided a definitive answer. Finalizing retrieval, skipping vector search.
-2025-08-08 17:42:22,468 - [INFO] - [src.agent:61] - [TIMER] Synthesis LLM Call (Flash) took 511.22 ms
-2025-08-08 17:42:22,468 - [INFO] - [src.agent:61] - [TIMER] Single RAG Step for 'What company is the sponsor fo...' took 4183.75 ms
-2025-08-08 17:42:22,468 - [INFO] - [src.agent:61] - [TIMER] Full Agent Run took 5918.88 ms
-2025-08-08 17:42:29,014 - [INFO] - [src.planner.query_rewriter:76] - Query deemed standalone. Bypassing LLM rewrite. Query: 'What is Amivantamab used to treat?'
-2025-08-08 17:42:29,469 - [INFO] - [src.planner.persona_classifier:60] - Query classified for persona: 'clinical_analyst'
-2025-08-08 17:42:30,541 - [INFO] - [src.agent:61] - [TIMER] Decomposition took 1071.79 ms
-2025-08-08 17:42:30,541 - [INFO] - [src.agent:229] - Executing single-step plan for query: 'What is Amivantamab used to treat?'
-2025-08-08 17:42:30,541 - [INFO] - [src.planner.query_classifier:56] - Classifying query: What is Amivantamab used to treat?
-2025-08-08 17:42:31,237 - [INFO] - [src.planner.query_classifier:76] - Classification result: {
-  "intent": "specific_fact_lookup",
-  "keywords": [
-    "Amivantamab"
-  ],
-  "question_is_graph_suitable": true,
-  "themes": [
-    "Indication/Population Description"
-  ]
-}
-2025-08-08 17:42:31,237 - [INFO] - [src.planner.tool_planner:67] - Planning tools for intent 'specific_fact_lookup' and persona 'clinical_analyst'
-2025-08-08 17:42:31,237 - [INFO] - [src.planner.tool_planner:110] - Coverage threshold of 0.85 met. Finalizing plan.
-2025-08-08 17:42:31,238 - [INFO] - [src.planner.tool_planner:113] - Generated tool plan: ['{\n  "tool_name": "query_knowledge_graph",\n  "estimated_coverage": 0.81\n}', '{\n  "tool_name": "vector_search",\n  "estimated_coverage": 0.5\n}']
-2025-08-08 17:42:31,238 - [INFO] - [src.agent:132] - Query is suitable for Knowledge Graph. Executing KG tool first.
-2025-08-08 17:42:31,238 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'query_knowledge_graph'
-2025-08-08 17:42:32,402 - [INFO] - [src.tools.retrievers:170] - Generated Cypher: MATCH (start_node:Entity)-[r:HASINDICATION]->(end_node:Entity) WHERE start_node.name_normalized = 'amivantamab' RETURN start_node, end_node, type(r) as rel_type, properties(r) as r_props
-2025-08-08 17:42:32,674 - [INFO] - [src.tools.retrievers:179] - KG tool successfully retrieved and serialized 1 facts.
-2025-08-08 17:42:32,674 - [INFO] - [src.tools.retrievers:32] - [TIMER] Tool: query_knowledge_graph took 1436.88 ms
-2025-08-08 17:42:32,675 - [INFO] - [src.agent:137] - Knowledge Graph provided a definitive answer. Finalizing retrieval, skipping vector search.
-2025-08-08 17:42:33,181 - [INFO] - [src.agent:61] - [TIMER] Synthesis LLM Call (Flash) took 506.60 ms
-2025-08-08 17:42:33,181 - [INFO] - [src.agent:61] - [TIMER] Single RAG Step for 'What is Amivantamab used to tr...' took 2640.49 ms
-2025-08-08 17:42:33,181 - [INFO] - [src.agent:61] - [TIMER] Full Agent Run took 4167.24 ms
-2025-08-08 17:42:37,646 - [INFO] - [src.planner.query_rewriter:76] - Query deemed standalone. Bypassing LLM rewrite. Query: 'What is the trade name for Dostarlimab?'
-2025-08-08 17:42:38,145 - [INFO] - [src.planner.persona_classifier:60] - Query classified for persona: 'clinical_analyst'
-2025-08-08 17:42:39,232 - [INFO] - [src.agent:61] - [TIMER] Decomposition took 1086.78 ms
-2025-08-08 17:42:39,232 - [INFO] - [src.agent:229] - Executing single-step plan for query: 'What is the trade name for Dostarlimab?'
-2025-08-08 17:42:39,232 - [INFO] - [src.planner.query_classifier:56] - Classifying query: What is the trade name for Dostarlimab?
-2025-08-08 17:42:39,977 - [INFO] - [src.planner.query_classifier:76] - Classification result: {
-  "intent": "specific_fact_lookup",
-  "keywords": [
-    "Dostarlimab",
-    "trade name"
-  ],
-  "question_is_graph_suitable": true,
-  "themes": [
-    "Drug/Therapy Description"
-  ]
-}
-2025-08-08 17:42:39,977 - [INFO] - [src.planner.tool_planner:67] - Planning tools for intent 'specific_fact_lookup' and persona 'clinical_analyst'
-2025-08-08 17:42:39,977 - [INFO] - [src.planner.tool_planner:110] - Coverage threshold of 0.85 met. Finalizing plan.
-2025-08-08 17:42:39,977 - [INFO] - [src.planner.tool_planner:113] - Generated tool plan: ['{\n  "tool_name": "query_knowledge_graph",\n  "estimated_coverage": 0.81\n}', '{\n  "tool_name": "vector_search",\n  "estimated_coverage": 0.5\n}']
-2025-08-08 17:42:39,977 - [INFO] - [src.agent:132] - Query is suitable for Knowledge Graph. Executing KG tool first.
-2025-08-08 17:42:39,977 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'query_knowledge_graph'
-2025-08-08 17:42:41,453 - [INFO] - [src.tools.retrievers:170] - Generated Cypher: MATCH (start_node:Entity)-[r:HASTRADENAME]->(end_node:Entity) WHERE start_node.name_normalized = 'dostarlimab' RETURN start_node, end_node, type(r) as rel_type, properties(r) as r_props
-2025-08-08 17:42:41,708 - [INFO] - [src.tools.retrievers:179] - KG tool successfully retrieved and serialized 1 facts.
-2025-08-08 17:42:41,708 - [INFO] - [src.tools.retrievers:32] - [TIMER] Tool: query_knowledge_graph took 1730.91 ms
-2025-08-08 17:42:41,708 - [INFO] - [src.agent:137] - Knowledge Graph provided a definitive answer. Finalizing retrieval, skipping vector search.
-2025-08-08 17:42:42,216 - [INFO] - [src.agent:61] - [TIMER] Synthesis LLM Call (Flash) took 507.51 ms
-2025-08-08 17:42:42,216 - [INFO] - [src.agent:61] - [TIMER] Single RAG Step for 'What is the trade name for Dos...' took 2983.96 ms
-2025-08-08 17:42:42,216 - [INFO] - [src.agent:61] - [TIMER] Full Agent Run took 4570.74 ms
-2025-08-08 17:45:02,328 - [INFO] - [src.planner.query_rewriter:76] - Query deemed standalone. Bypassing LLM rewrite. Query: 'What is the dosage form of Apomorphine?'
-2025-08-08 17:45:02,874 - [INFO] - [src.planner.persona_classifier:60] - Query classified for persona: 'clinical_analyst'
-2025-08-08 17:45:05,155 - [INFO] - [src.agent:61] - [TIMER] Decomposition took 2280.50 ms
-2025-08-08 17:45:05,155 - [INFO] - [src.agent:229] - Executing single-step plan for query: 'What is the dosage form of Apomorphine?'
-2025-08-08 17:45:05,155 - [INFO] - [src.planner.query_classifier:56] - Classifying query: What is the dosage form of Apomorphine?
-2025-08-08 17:45:06,654 - [INFO] - [src.planner.query_classifier:76] - Classification result: {
+2025-08-08 17:51:30,834 - [INFO] - [src.tools.clients:48] - Google AI client configured successfully.
+2025-08-08 17:51:30,834 - [INFO] - [src.tools.clients:65] - Requesting Flash Model: gemini-1.5-flash-latest
+2025-08-08 17:51:30,836 - [INFO] - [src.planner.tool_planner:58] - Successfully loaded persona-tool map from '/home/mit/persona_rag_chatbot/config/persona_tool_map.yml'.
+2025-08-08 17:51:30,836 - [INFO] - [src.router.tool_router:19] - ToolRouter initialized with 2 tools.
+2025-08-08 17:51:30,836 - [INFO] - [src.tools.clients:58] - Requesting GenerativeModel: gemini-1.5-pro-latest
+2025-08-08 17:51:30,836 - [INFO] - [src.tools.clients:65] - Requesting Flash Model: gemini-1.5-flash-latest
+2025-08-08 17:51:30,836 - [INFO] - [__main__:51] - Unified agent initialized successfully and cached for the session.
+2025-08-08 17:51:32,712 - [INFO] - [src.planner.query_rewriter:76] - Query deemed standalone. Bypassing LLM rewrite. Query: 'What is the dosage form of Apomorphine?'
+2025-08-08 17:51:40,354 - [INFO] - [src.planner.persona_classifier:60] - Query classified for persona: 'clinical_analyst'
+2025-08-08 17:51:48,390 - [INFO] - [src.agent:61] - [TIMER] Decomposition took 8036.24 ms
+2025-08-08 17:51:48,390 - [INFO] - [src.agent:229] - Executing single-step plan for query: 'What is the dosage form of Apomorphine?'
+2025-08-08 17:51:48,390 - [INFO] - [src.planner.query_classifier:56] - Classifying query: What is the dosage form of Apomorphine?
+2025-08-08 17:51:57,008 - [INFO] - [src.planner.query_classifier:76] - Classification result: {
   "intent": "specific_fact_lookup",
   "keywords": [
     "Apomorphine",
@@ -118,25 +27,26 @@
     "Dosage and Administration"
   ]
 }
-2025-08-08 17:45:06,654 - [INFO] - [src.planner.tool_planner:67] - Planning tools for intent 'specific_fact_lookup' and persona 'clinical_analyst'
-2025-08-08 17:45:06,654 - [INFO] - [src.planner.tool_planner:110] - Coverage threshold of 0.85 met. Finalizing plan.
-2025-08-08 17:45:06,654 - [INFO] - [src.planner.tool_planner:113] - Generated tool plan: ['{\n  "tool_name": "query_knowledge_graph",\n  "estimated_coverage": 0.81\n}', '{\n  "tool_name": "vector_search",\n  "estimated_coverage": 0.5\n}']
-2025-08-08 17:45:06,654 - [INFO] - [src.agent:132] - Query is suitable for Knowledge Graph. Executing KG tool first.
-2025-08-08 17:45:06,654 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'query_knowledge_graph'
-2025-08-08 17:45:08,696 - [INFO] - [src.tools.retrievers:170] - Generated Cypher: MATCH (start_node:Entity)-[r:HASDOSAGEFORM]->(end_node:Entity) WHERE start_node.name_normalized = 'apomorphine' RETURN start_node, end_node, type(r) as rel_type, properties(r) as r_props
-2025-08-08 17:45:08,951 - [INFO] - [src.tools.retrievers:179] - KG tool successfully retrieved and serialized 3 facts.
-2025-08-08 17:45:08,951 - [INFO] - [src.tools.retrievers:32] - [TIMER] Tool: query_knowledge_graph took 2296.89 ms
-2025-08-08 17:45:08,951 - [INFO] - [src.agent:137] - Knowledge Graph provided a definitive answer. Finalizing retrieval, skipping vector search.
-2025-08-08 17:45:09,744 - [INFO] - [src.agent:61] - [TIMER] Synthesis LLM Call (Flash) took 792.69 ms
-2025-08-08 17:45:09,744 - [INFO] - [src.agent:61] - [TIMER] Single RAG Step for 'What is the dosage form of Apo...' took 4588.60 ms
-2025-08-08 17:45:09,744 - [INFO] - [src.agent:61] - [TIMER] Full Agent Run took 7415.52 ms
-2025-08-08 17:45:21,556 - [INFO] - [src.planner.query_rewriter:76] - Query deemed standalone. Bypassing LLM rewrite. Query: 'Which sponsors made submissions in both the March 2025 and July 2025 meetings?'
-2025-08-08 17:45:22,002 - [INFO] - [src.planner.persona_classifier:60] - Query classified for persona: 'regulatory_specialist'
-2025-08-08 17:45:23,490 - [INFO] - [src.agent:61] - [TIMER] Decomposition took 1488.28 ms
-2025-08-08 17:45:23,490 - [INFO] - [src.agent:232] - Executing multi-step plan for query: 'Which sponsors made submissions in both the March 2025 and July 2025 meetings?'
-2025-08-08 17:45:23,490 - [INFO] - [src.planner.query_classifier:56] - Classifying query: Which sponsors made submissions in the March 2025 meeting?
-2025-08-08 17:45:23,491 - [INFO] - [src.planner.query_classifier:56] - Classifying query: Which sponsors made submissions in the July 2025 meeting?
-2025-08-08 17:45:24,419 - [INFO] - [src.planner.query_classifier:76] - Classification result: {
+2025-08-08 17:51:57,008 - [INFO] - [src.planner.tool_planner:67] - Planning tools for intent 'specific_fact_lookup' and persona 'clinical_analyst'
+2025-08-08 17:51:57,008 - [INFO] - [src.planner.tool_planner:110] - Coverage threshold of 0.85 met. Finalizing plan.
+2025-08-08 17:51:57,008 - [INFO] - [src.planner.tool_planner:113] - Generated tool plan: ['{\n  "tool_name": "query_knowledge_graph",\n  "estimated_coverage": 0.81\n}', '{\n  "tool_name": "vector_search",\n  "estimated_coverage": 0.5\n}']
+2025-08-08 17:51:57,008 - [INFO] - [src.agent:132] - Query is suitable for Knowledge Graph. Executing KG tool first.
+2025-08-08 17:51:57,008 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'query_knowledge_graph'
+2025-08-08 17:51:58,195 - [INFO] - [src.tools.clients:97] - Neo4j driver connected successfully.
+2025-08-08 17:52:08,431 - [INFO] - [src.tools.retrievers:170] - Generated Cypher: MATCH (start_node:Entity)-[r:HASDOSAGEFORM]->(end_node:Entity) WHERE start_node.name_normalized = 'apomorphine' RETURN start_node, end_node, type(r) as rel_type, properties(r) as r_props
+2025-08-08 17:52:08,644 - [INFO] - [src.tools.retrievers:179] - KG tool successfully retrieved and serialized 3 facts.
+2025-08-08 17:52:08,644 - [INFO] - [src.tools.retrievers:32] - [TIMER] Tool: query_knowledge_graph took 11635.30 ms
+2025-08-08 17:52:08,644 - [INFO] - [src.agent:137] - Knowledge Graph provided a definitive answer. Finalizing retrieval, skipping vector search.
+2025-08-08 17:52:17,062 - [INFO] - [src.agent:61] - [TIMER] Synthesis LLM Call (Flash) took 8418.37 ms
+2025-08-08 17:52:17,062 - [INFO] - [src.agent:61] - [TIMER] Single RAG Step for 'What is the dosage form of Apo...' took 28672.06 ms
+2025-08-08 17:52:17,062 - [INFO] - [src.agent:61] - [TIMER] Full Agent Run took 44349.96 ms
+2025-08-08 17:55:15,561 - [INFO] - [src.planner.query_rewriter:76] - Query deemed standalone. Bypassing LLM rewrite. Query: 'Which sponsors made submissions in both the March 2025 and July 2025 meetings?'
+2025-08-08 17:55:16,891 - [INFO] - [src.planner.persona_classifier:60] - Query classified for persona: 'regulatory_specialist'
+2025-08-08 17:55:17,935 - [INFO] - [src.agent:61] - [TIMER] Decomposition took 1043.52 ms
+2025-08-08 17:55:17,935 - [INFO] - [src.agent:232] - Executing multi-step plan for query: 'Which sponsors made submissions in both the March 2025 and July 2025 meetings?'
+2025-08-08 17:55:17,935 - [INFO] - [src.planner.query_classifier:56] - Classifying query: Which sponsors made submissions in the March 2025 meeting?
+2025-08-08 17:55:17,936 - [INFO] - [src.planner.query_classifier:56] - Classifying query: Which sponsors made submissions in the July 2025 meeting?
+2025-08-08 17:55:19,565 - [INFO] - [src.planner.query_classifier:76] - Classification result: {
   "intent": "specific_fact_lookup",
   "keywords": [
     "sponsors",
@@ -148,12 +58,12 @@
     "Regulatory History"
   ]
 }
-2025-08-08 17:45:24,419 - [INFO] - [src.planner.tool_planner:67] - Planning tools for intent 'specific_fact_lookup' and persona 'regulatory_specialist'
-2025-08-08 17:45:24,419 - [INFO] - [src.planner.tool_planner:110] - Coverage threshold of 0.85 met. Finalizing plan.
-2025-08-08 17:45:24,419 - [INFO] - [src.planner.tool_planner:113] - Generated tool plan: ['{\n  "tool_name": "query_knowledge_graph",\n  "estimated_coverage": 0.81\n}', '{\n  "tool_name": "vector_search",\n  "estimated_coverage": 0.5\n}']
-2025-08-08 17:45:24,419 - [INFO] - [src.agent:132] - Query is suitable for Knowledge Graph. Executing KG tool first.
-2025-08-08 17:45:24,419 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'query_knowledge_graph'
-2025-08-08 17:45:25,131 - [INFO] - [src.planner.query_classifier:76] - Classification result: {
+2025-08-08 17:55:19,566 - [INFO] - [src.planner.tool_planner:67] - Planning tools for intent 'specific_fact_lookup' and persona 'regulatory_specialist'
+2025-08-08 17:55:19,566 - [INFO] - [src.planner.tool_planner:110] - Coverage threshold of 0.85 met. Finalizing plan.
+2025-08-08 17:55:19,566 - [INFO] - [src.planner.tool_planner:113] - Generated tool plan: ['{\n  "tool_name": "query_knowledge_graph",\n  "estimated_coverage": 0.81\n}', '{\n  "tool_name": "vector_search",\n  "estimated_coverage": 0.5\n}']
+2025-08-08 17:55:19,566 - [INFO] - [src.agent:132] - Query is suitable for Knowledge Graph. Executing KG tool first.
+2025-08-08 17:55:19,566 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'query_knowledge_graph'
+2025-08-08 17:55:19,767 - [INFO] - [src.planner.query_classifier:76] - Classification result: {
   "intent": "specific_fact_lookup",
   "keywords": [
     "sponsors",
@@ -165,40 +75,40 @@
     "Regulatory History"
   ]
 }
-2025-08-08 17:45:25,131 - [INFO] - [src.planner.tool_planner:67] - Planning tools for intent 'specific_fact_lookup' and persona 'regulatory_specialist'
-2025-08-08 17:45:25,131 - [INFO] - [src.planner.tool_planner:110] - Coverage threshold of 0.85 met. Finalizing plan.
-2025-08-08 17:45:25,131 - [INFO] - [src.planner.tool_planner:113] - Generated tool plan: ['{\n  "tool_name": "query_knowledge_graph",\n  "estimated_coverage": 0.81\n}', '{\n  "tool_name": "vector_search",\n  "estimated_coverage": 0.5\n}']
-2025-08-08 17:45:25,131 - [INFO] - [src.agent:132] - Query is suitable for Knowledge Graph. Executing KG tool first.
-2025-08-08 17:45:25,131 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'query_knowledge_graph'
-2025-08-08 17:45:25,185 - [INFO] - [src.tools.retrievers:32] - [TIMER] Tool: query_knowledge_graph took 765.36 ms
-2025-08-08 17:45:25,185 - [INFO] - [src.agent:142] - KG was unsuitable or did not provide a definitive answer. Executing vector search.
-2025-08-08 17:45:25,185 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'vector_search'
-2025-08-08 17:45:26,144 - [INFO] - [src.tools.retrievers:32] - [TIMER] Tool: query_knowledge_graph took 1012.78 ms
-2025-08-08 17:45:26,144 - [INFO] - [src.agent:142] - KG was unsuitable or did not provide a definitive answer. Executing vector search.
-2025-08-08 17:45:26,144 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'vector_search'
-2025-08-08 17:45:26,564 - [INFO] - [src.tools.clients:79] - Pinecone index 'pbac-rag-index' connected successfully.
-2025-08-08 17:45:26,565 - [INFO] - [src.tools.retrievers:116] - Applying metadata filter: {'semantic_purpose': {'$in': ['Regulatory History']}}
-2025-08-08 17:45:27,466 - [INFO] - [src.tools.clients:79] - Pinecone index 'pbac-rag-index' connected successfully.
-2025-08-08 17:45:27,467 - [INFO] - [src.tools.retrievers:116] - Applying metadata filter: {'semantic_purpose': {'$in': ['Regulatory History']}}
-2025-08-08 17:45:28,160 - [INFO] - [src.tools.retrievers:32] - [TIMER] Tool: vector_search took 2975.21 ms
-2025-08-08 17:45:28,919 - [INFO] - [src.agent:116] - Re-ranked 3 snippets down to 2 using Gemini based on indices: [1, 2].
-2025-08-08 17:45:28,919 - [INFO] - [src.agent:61] - [TIMER] Re-ranking with Gemini took 758.85 ms
-2025-08-08 17:45:29,091 - [INFO] - [src.tools.retrievers:32] - [TIMER] Tool: vector_search took 2947.06 ms
-2025-08-08 17:45:29,776 - [INFO] - [src.agent:61] - [TIMER] Synthesis LLM Call (Flash) took 857.15 ms
-2025-08-08 17:45:29,776 - [INFO] - [src.agent:61] - [TIMER] Single RAG Step for 'Which sponsors made submission...' took 6286.00 ms
-2025-08-08 17:45:30,423 - [INFO] - [src.agent:116] - Re-ranked 3 snippets down to 1 using Gemini based on indices: [0].
-2025-08-08 17:45:30,424 - [INFO] - [src.agent:61] - [TIMER] Re-ranking with Gemini took 1331.61 ms
-2025-08-08 17:45:31,223 - [INFO] - [src.agent:61] - [TIMER] Synthesis LLM Call (Flash) took 799.81 ms
-2025-08-08 17:45:31,223 - [INFO] - [src.agent:61] - [TIMER] Single RAG Step for 'Which sponsors made submission...' took 7732.99 ms
-2025-08-08 17:45:33,222 - [INFO] - [src.agent:61] - [TIMER] Reasoning Synthesis LLM Call (Pro) took 1997.97 ms
-2025-08-08 17:45:33,222 - [INFO] - [src.agent:61] - [TIMER] Full Agent Run took 11665.90 ms
-2025-08-08 17:45:42,636 - [INFO] - [src.planner.query_rewriter:76] - Query deemed standalone. Bypassing LLM rewrite. Query: 'Compare the submission purposes for Acalabrutinib and Alectinib in the 2025 meetings.'
-2025-08-08 17:45:43,125 - [INFO] - [src.planner.persona_classifier:60] - Query classified for persona: 'regulatory_specialist'
-2025-08-08 17:45:45,117 - [INFO] - [src.agent:61] - [TIMER] Decomposition took 1991.64 ms
-2025-08-08 17:45:45,117 - [INFO] - [src.agent:232] - Executing multi-step plan for query: 'Compare the submission purposes for Acalabrutinib and Alectinib in the 2025 meetings.'
-2025-08-08 17:45:45,117 - [INFO] - [src.planner.query_classifier:56] - Classifying query: What was the submission purpose for Acalabrutinib in the 2025 meetings?
-2025-08-08 17:45:45,117 - [INFO] - [src.planner.query_classifier:56] - Classifying query: What was the submission purpose for Alectinib in the 2025 meetings?
-2025-08-08 17:45:46,383 - [INFO] - [src.planner.query_classifier:76] - Classification result: {
+2025-08-08 17:55:19,767 - [INFO] - [src.planner.tool_planner:67] - Planning tools for intent 'specific_fact_lookup' and persona 'regulatory_specialist'
+2025-08-08 17:55:19,767 - [INFO] - [src.planner.tool_planner:110] - Coverage threshold of 0.85 met. Finalizing plan.
+2025-08-08 17:55:19,768 - [INFO] - [src.planner.tool_planner:113] - Generated tool plan: ['{\n  "tool_name": "query_knowledge_graph",\n  "estimated_coverage": 0.81\n}', '{\n  "tool_name": "vector_search",\n  "estimated_coverage": 0.5\n}']
+2025-08-08 17:55:19,768 - [INFO] - [src.agent:132] - Query is suitable for Knowledge Graph. Executing KG tool first.
+2025-08-08 17:55:19,768 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'query_knowledge_graph'
+2025-08-08 17:55:20,485 - [INFO] - [src.tools.retrievers:32] - [TIMER] Tool: query_knowledge_graph took 919.77 ms
+2025-08-08 17:55:20,486 - [INFO] - [src.agent:142] - KG was unsuitable or did not provide a definitive answer. Executing vector search.
+2025-08-08 17:55:20,486 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'vector_search'
+2025-08-08 17:55:21,393 - [INFO] - [src.tools.retrievers:32] - [TIMER] Tool: query_knowledge_graph took 1625.01 ms
+2025-08-08 17:55:21,393 - [INFO] - [src.agent:142] - KG was unsuitable or did not provide a definitive answer. Executing vector search.
+2025-08-08 17:55:21,393 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'vector_search'
+2025-08-08 17:55:21,589 - [INFO] - [src.tools.clients:79] - Pinecone index 'pbac-rag-index' connected successfully.
+2025-08-08 17:55:21,589 - [INFO] - [src.tools.retrievers:116] - Applying metadata filter: {'semantic_purpose': {'$in': ['Regulatory History']}}
+2025-08-08 17:55:22,373 - [INFO] - [src.tools.clients:79] - Pinecone index 'pbac-rag-index' connected successfully.
+2025-08-08 17:55:22,375 - [INFO] - [src.tools.retrievers:116] - Applying metadata filter: {'semantic_purpose': {'$in': ['Regulatory History']}}
+2025-08-08 17:55:23,174 - [INFO] - [src.tools.retrievers:32] - [TIMER] Tool: vector_search took 2688.56 ms
+2025-08-08 17:55:23,927 - [INFO] - [src.agent:116] - Re-ranked 3 snippets down to 2 using Gemini based on indices: [1, 2].
+2025-08-08 17:55:23,927 - [INFO] - [src.agent:61] - [TIMER] Re-ranking with Gemini took 752.42 ms
+2025-08-08 17:55:24,040 - [INFO] - [src.tools.retrievers:32] - [TIMER] Tool: vector_search took 2646.58 ms
+2025-08-08 17:55:25,004 - [INFO] - [src.agent:61] - [TIMER] Synthesis LLM Call (Flash) took 1077.41 ms
+2025-08-08 17:55:25,005 - [INFO] - [src.agent:61] - [TIMER] Single RAG Step for 'Which sponsors made submission...' took 7069.36 ms
+2025-08-08 17:55:25,524 - [INFO] - [src.agent:116] - Re-ranked 3 snippets down to 1 using Gemini based on indices: [0].
+2025-08-08 17:55:25,524 - [INFO] - [src.agent:61] - [TIMER] Re-ranking with Gemini took 1481.06 ms
+2025-08-08 17:55:26,772 - [INFO] - [src.agent:61] - [TIMER] Synthesis LLM Call (Flash) took 1247.90 ms
+2025-08-08 17:55:26,772 - [INFO] - [src.agent:61] - [TIMER] Single RAG Step for 'Which sponsors made submission...' took 8836.12 ms
+2025-08-08 17:55:28,702 - [INFO] - [src.agent:61] - [TIMER] Reasoning Synthesis LLM Call (Pro) took 1930.14 ms
+2025-08-08 17:55:28,702 - [INFO] - [src.agent:61] - [TIMER] Full Agent Run took 13141.01 ms
+2025-08-08 17:55:41,230 - [INFO] - [src.planner.query_rewriter:76] - Query deemed standalone. Bypassing LLM rewrite. Query: 'Compare the submission purposes for Acalabrutinib and Alectinib in the 2025 meetings.'
+2025-08-08 17:55:41,670 - [INFO] - [src.planner.persona_classifier:60] - Query classified for persona: 'regulatory_specialist'
+2025-08-08 17:55:43,340 - [INFO] - [src.agent:61] - [TIMER] Decomposition took 1669.96 ms
+2025-08-08 17:55:43,340 - [INFO] - [src.agent:232] - Executing multi-step plan for query: 'Compare the submission purposes for Acalabrutinib and Alectinib in the 2025 meetings.'
+2025-08-08 17:55:43,341 - [INFO] - [src.planner.query_classifier:56] - Classifying query: What was the submission purpose for Acalabrutinib in the 2025 meetings?
+2025-08-08 17:55:43,341 - [INFO] - [src.planner.query_classifier:56] - Classifying query: What was the submission purpose for Alectinib in the 2025 meetings?
+2025-08-08 17:55:44,088 - [INFO] - [src.planner.query_classifier:76] - Classification result: {
   "intent": "specific_fact_lookup",
   "keywords": [
     "Acalabrutinib",
@@ -210,43 +120,43 @@
     "Regulatory History"
   ]
 }
-2025-08-08 17:45:46,384 - [INFO] - [src.planner.tool_planner:67] - Planning tools for intent 'specific_fact_lookup' and persona 'regulatory_specialist'
-2025-08-08 17:45:46,384 - [INFO] - [src.planner.tool_planner:110] - Coverage threshold of 0.85 met. Finalizing plan.
-2025-08-08 17:45:46,384 - [INFO] - [src.planner.tool_planner:113] - Generated tool plan: ['{\n  "tool_name": "query_knowledge_graph",\n  "estimated_coverage": 0.81\n}', '{\n  "tool_name": "vector_search",\n  "estimated_coverage": 0.5\n}']
-2025-08-08 17:45:46,384 - [INFO] - [src.agent:132] - Query is suitable for Knowledge Graph. Executing KG tool first.
-2025-08-08 17:45:46,384 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'query_knowledge_graph'
-2025-08-08 17:45:47,249 - [INFO] - [src.planner.query_classifier:76] - Classification result: {
+2025-08-08 17:55:44,089 - [INFO] - [src.planner.tool_planner:67] - Planning tools for intent 'specific_fact_lookup' and persona 'regulatory_specialist'
+2025-08-08 17:55:44,089 - [INFO] - [src.planner.tool_planner:110] - Coverage threshold of 0.85 met. Finalizing plan.
+2025-08-08 17:55:44,089 - [INFO] - [src.planner.tool_planner:113] - Generated tool plan: ['{\n  "tool_name": "query_knowledge_graph",\n  "estimated_coverage": 0.81\n}', '{\n  "tool_name": "vector_search",\n  "estimated_coverage": 0.5\n}']
+2025-08-08 17:55:44,089 - [INFO] - [src.agent:132] - Query is suitable for Knowledge Graph. Executing KG tool first.
+2025-08-08 17:55:44,089 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'query_knowledge_graph'
+2025-08-08 17:55:44,971 - [INFO] - [src.tools.retrievers:32] - [TIMER] Tool: query_knowledge_graph took 882.42 ms
+2025-08-08 17:55:44,972 - [INFO] - [src.agent:142] - KG was unsuitable or did not provide a definitive answer. Executing vector search.
+2025-08-08 17:55:44,972 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'vector_search'
+2025-08-08 17:55:44,972 - [INFO] - [src.tools.retrievers:116] - Applying metadata filter: {'semantic_purpose': {'$in': ['Regulatory History']}}
+2025-08-08 17:55:45,088 - [INFO] - [src.planner.query_classifier:76] - Classification result: {
   "intent": "specific_fact_lookup",
   "keywords": [
     "Alectinib",
-    "2025 meetings",
-    "submission purpose"
+    "submission purpose",
+    "2025 meetings"
   ],
   "question_is_graph_suitable": true,
   "themes": [
     "Regulatory History"
   ]
 }
-2025-08-08 17:45:47,249 - [INFO] - [src.planner.tool_planner:67] - Planning tools for intent 'specific_fact_lookup' and persona 'regulatory_specialist'
-2025-08-08 17:45:47,249 - [INFO] - [src.planner.tool_planner:110] - Coverage threshold of 0.85 met. Finalizing plan.
-2025-08-08 17:45:47,249 - [INFO] - [src.planner.tool_planner:113] - Generated tool plan: ['{\n  "tool_name": "query_knowledge_graph",\n  "estimated_coverage": 0.81\n}', '{\n  "tool_name": "vector_search",\n  "estimated_coverage": 0.5\n}']
-2025-08-08 17:45:47,249 - [INFO] - [src.agent:132] - Query is suitable for Knowledge Graph. Executing KG tool first.
-2025-08-08 17:45:47,250 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'query_knowledge_graph'
-2025-08-08 17:45:47,448 - [INFO] - [src.tools.retrievers:32] - [TIMER] Tool: query_knowledge_graph took 1064.37 ms
-2025-08-08 17:45:47,448 - [INFO] - [src.agent:142] - KG was unsuitable or did not provide a definitive answer. Executing vector search.
-2025-08-08 17:45:47,448 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'vector_search'
-2025-08-08 17:45:47,448 - [INFO] - [src.tools.retrievers:116] - Applying metadata filter: {'semantic_purpose': {'$in': ['Regulatory History']}}
-2025-08-08 17:45:48,238 - [INFO] - [src.tools.retrievers:32] - [TIMER] Tool: vector_search took 789.46 ms
-2025-08-08 17:45:49,097 - [INFO] - [src.tools.retrievers:32] - [TIMER] Tool: query_knowledge_graph took 1847.61 ms
-2025-08-08 17:45:49,097 - [INFO] - [src.agent:142] - KG was unsuitable or did not provide a definitive answer. Executing vector search.
-2025-08-08 17:45:49,098 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'vector_search'
-2025-08-08 17:45:49,098 - [INFO] - [src.tools.retrievers:116] - Applying metadata filter: {'semantic_purpose': {'$in': ['Regulatory History']}}
-2025-08-08 17:45:49,454 - [INFO] - [src.agent:116] - Re-ranked 3 snippets down to 0 using Gemini based on indices: [].
-2025-08-08 17:45:49,454 - [INFO] - [src.agent:61] - [TIMER] Re-ranking with Gemini took 1215.84 ms
-2025-08-08 17:45:49,454 - [INFO] - [src.agent:61] - [TIMER] Single RAG Step for 'What was the submission purpos...' took 4336.93 ms
-2025-08-08 17:45:49,744 - [INFO] - [src.tools.retrievers:32] - [TIMER] Tool: vector_search took 646.12 ms
-2025-08-08 17:45:51,231 - [INFO] - [src.agent:116] - Re-ranked 3 snippets down to 0 using Gemini based on indices: [].
-2025-08-08 17:45:51,231 - [INFO] - [src.agent:61] - [TIMER] Re-ranking with Gemini took 1487.36 ms
-2025-08-08 17:45:51,231 - [INFO] - [src.agent:61] - [TIMER] Single RAG Step for 'What was the submission purpos...' took 6114.09 ms
-2025-08-08 17:45:52,318 - [INFO] - [src.agent:61] - [TIMER] Reasoning Synthesis LLM Call (Pro) took 1086.21 ms
-2025-08-08 17:45:52,318 - [INFO] - [src.agent:61] - [TIMER] Full Agent Run took 9682.36 ms
+2025-08-08 17:55:45,088 - [INFO] - [src.planner.tool_planner:67] - Planning tools for intent 'specific_fact_lookup' and persona 'regulatory_specialist'
+2025-08-08 17:55:45,088 - [INFO] - [src.planner.tool_planner:110] - Coverage threshold of 0.85 met. Finalizing plan.
+2025-08-08 17:55:45,088 - [INFO] - [src.planner.tool_planner:113] - Generated tool plan: ['{\n  "tool_name": "query_knowledge_graph",\n  "estimated_coverage": 0.81\n}', '{\n  "tool_name": "vector_search",\n  "estimated_coverage": 0.5\n}']
+2025-08-08 17:55:45,088 - [INFO] - [src.agent:132] - Query is suitable for Knowledge Graph. Executing KG tool first.
+2025-08-08 17:55:45,088 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'query_knowledge_graph'
+2025-08-08 17:55:45,943 - [INFO] - [src.tools.retrievers:32] - [TIMER] Tool: vector_search took 971.47 ms
+2025-08-08 17:55:46,342 - [INFO] - [src.tools.retrievers:32] - [TIMER] Tool: query_knowledge_graph took 1253.97 ms
+2025-08-08 17:55:46,343 - [INFO] - [src.agent:142] - KG was unsuitable or did not provide a definitive answer. Executing vector search.
+2025-08-08 17:55:46,343 - [INFO] - [src.router.tool_router:22] - [ToolRouter] Executing tool: 'vector_search'
+2025-08-08 17:55:46,343 - [INFO] - [src.tools.retrievers:116] - Applying metadata filter: {'semantic_purpose': {'$in': ['Regulatory History']}}
+2025-08-08 17:55:46,863 - [INFO] - [src.agent:116] - Re-ranked 3 snippets down to 0 using Gemini based on indices: [].
+2025-08-08 17:55:46,863 - [INFO] - [src.agent:61] - [TIMER] Re-ranking with Gemini took 919.30 ms
+2025-08-08 17:55:46,863 - [INFO] - [src.agent:61] - [TIMER] Single RAG Step for 'What was the submission purpos...' took 3522.21 ms
+2025-08-08 17:55:47,458 - [INFO] - [src.tools.retrievers:32] - [TIMER] Tool: vector_search took 1115.72 ms
+2025-08-08 17:55:48,024 - [INFO] - [src.agent:116] - Re-ranked 3 snippets down to 0 using Gemini based on indices: [].
+2025-08-08 17:55:48,024 - [INFO] - [src.agent:61] - [TIMER] Re-ranking with Gemini took 565.77 ms
+2025-08-08 17:55:48,024 - [INFO] - [src.agent:61] - [TIMER] Single RAG Step for 'What was the submission purpos...' took 4683.61 ms
+2025-08-08 17:55:49,609 - [INFO] - [src.agent:61] - [TIMER] Reasoning Synthesis LLM Call (Pro) took 1584.17 ms
+2025-08-08 17:55:49,609 - [INFO] - [src.agent:61] - [TIMER] Full Agent Run took 8379.24 ms
